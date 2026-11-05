@@ -3,6 +3,8 @@ from pathlib import Path
 
 IMAGES_DIR = Path("images")
 IMAGES_DIR.mkdir(exist_ok=True)
+THUMBNAILS_DIR = Path("thumbnails")
+THUMBNAILS_DIR.mkdir(exist_ok=True)
 
 conn = sqlite3.connect("prompts.db", check_same_thread=False)
 conn.row_factory = sqlite3.Row

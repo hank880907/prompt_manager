@@ -3,7 +3,7 @@ from contextlib import suppress
 
 from nicegui import app, ui
 
-from prompt_manager import api  # noqa: F401  registers API routes
+from prompt_manager.api import thumbnail_path
 from prompt_manager.auth import (ADMIN_PASSWORD, ADMIN_USERNAME, add_user, delete_user, is_admin, safe_redirect,
                                  storage_secret, verify_user)
 from prompt_manager.db import IMAGES_DIR, execute, get, query
@@ -17,7 +17,13 @@ body { background: #f6f6f7; color: #18181b;
 .q-card { box-shadow: none; border: 1px solid #e4e4e7; border-radius: 12px; }
 .q-field--outlined .q-field__control { border-radius: 10px; background: #fff; }
 .q-field--outlined .q-field__control:before { border-color: #e4e4e7; }
+.viewer-track { scrollbar-width: none; overscroll-behavior-x: contain; opacity: 0; }
+.viewer-track::-webkit-scrollbar { display: none; }
 """
+SWIPE_INDEX_JS = """(e) => {
+    const i = String(Math.round(e.target.scrollLeft / e.target.clientWidth));
+    if (i !== e.target.dataset.index) { e.target.dataset.index = i; emit(Number(i)); }
+}"""
 
 
 def style() -> None:
@@ -171,7 +177,9 @@ def episode_page(episode_id: int):
 
     @ui.refreshable
     def scene_list():
-        scenes = query("SELECT s.*, i.filename AS thumbnail FROM scenes s LEFT JOIN images i ON i.id = s.selected_image_id "
+        scenes = query("SELECT s.*, i.filename AS thumbnail, "
+                       "(SELECT COUNT(*) FROM images WHERE scene_id = s.id) AS candidates "
+                       "FROM scenes s LEFT JOIN images i ON i.id = s.selected_image_id "
                        "WHERE s.episode_id = ? ORDER BY s.position", episode_id)
         if not scenes:
             empty_state("还没有场景")
@@ -184,7 +192,7 @@ def episode_page(episode_id: int):
                         with ui.link(target=f"/scene/{s['id']}").classes(
                                 "grow min-w-0 py-2 no-underline text-zinc-900 flex flex-nowrap items-center gap-3"):
                             if s["thumbnail"]:
-                                ui.image(f"/images/{s['thumbnail']}").props("fit=cover").classes("w-14 h-14 rounded-md shrink-0")
+                                ui.image(f"/thumbnails/{s['thumbnail']}").props("fit=cover").classes("w-14 h-14 rounded-md shrink-0")
                             else:
                                 with ui.element("div").classes("w-14 h-14 rounded-md shrink-0 bg-zinc-100 flex items-center justify-center"):
                                     ui.icon("image", color="grey-4")
@@ -193,6 +201,10 @@ def episode_page(episode_id: int):
                                     ui.label(str(i)).classes("text-xs text-zinc-400 shrink-0")
                                     ui.label(s["name"]).classes("font-medium truncate")
                                 ui.label(preview(s["image_positive"])).classes("text-xs text-zinc-400 truncate max-w-full")
+                        with ui.row().classes("no-wrap items-center gap-1 pl-2 text-xs text-zinc-400 tabular-nums"
+                                              + ("" if s["candidates"] else " opacity-50")):
+                            ui.icon("photo_library").classes("text-base")
+                            ui.label(str(s["candidates"]))
                         ui.icon("chevron_right", color="grey-5").classes("pr-2")
 
         def save_order():
@@ -219,6 +231,7 @@ def episode_page(episode_id: int):
 def delete_image(image) -> None:
     execute("DELETE FROM images WHERE id = ?", image["id"])
     (IMAGES_DIR / image["filename"]).unlink(missing_ok=True)
+    thumbnail_path(image["filename"]).unlink(missing_ok=True)
 
 
 def image_viewer(scene_id: int, images: list, index: int, on_close) -> None:
@@ -229,16 +242,32 @@ def image_viewer(scene_id: int, images: list, index: int, on_close) -> None:
             counter = ui.label().classes("text-white text-sm")
             ui.button("删除", icon="delete_outline", on_click=lambda: confirm_delete(f"候选图 {index + 1}", delete)
                       ).props("flat dense color=white no-caps")
-        image = ui.image().props("fit=contain").classes("w-full grow")
+        with ui.element("div").classes(
+                "viewer-track w-full grow min-h-0 flex flex-nowrap overflow-x-auto snap-x snap-mandatory") as track:
+            slides = [ui.image(f"/images/{img['filename']}")
+                      .props(f"fit=contain placeholder-src=/thumbnails/{img['filename']}")
+                      .classes("w-full h-full shrink-0 snap-center snap-always") for img in images]
         with ui.row().classes("w-full justify-between items-center no-wrap px-2 py-3"):
-            ui.button(icon="chevron_left", on_click=lambda: show(-1)).props("flat round color=white size=lg")
+            ui.button(icon="chevron_left", on_click=lambda: go(index - 1)).props("flat round color=white size=lg")
             select_button = ui.button(on_click=lambda: toggle_selected()).props("rounded unelevated no-caps")
-            ui.button(icon="chevron_right", on_click=lambda: show(1)).props("flat round color=white size=lg")
+            ui.button(icon="chevron_right", on_click=lambda: go(index + 1)).props("flat round color=white size=lg")
+        ui.keyboard(on_key=lambda e: on_key(e), ignore=["input", "textarea"])
 
-    def show(step: int = 0) -> None:
+    def on_swipe(e) -> None:
         nonlocal index
-        index = (index + step) % len(images)
-        image.set_source(f"/images/{images[index]['filename']}")
+        index = min(e.args, len(images) - 1)
+        update()
+
+    def go(target: int, smooth: bool = True) -> None:
+        target = max(0, min(target, len(images) - 1))
+        ui.run_javascript(f"const el = getHtmlElement({track.id}); el.style.opacity = 1; "
+                          f"el.scrollTo({{left: {target} * el.clientWidth, behavior: '{'smooth' if smooth else 'instant'}'}})")
+
+    def on_key(e) -> None:
+        if dialog.value and e.action.keydown and (e.key.arrow_left or e.key.arrow_right):
+            go(index + (-1 if e.key.arrow_left else 1))
+
+    def update() -> None:
         counter.text = f"{index + 1} / {len(images)}"
         selected = get("SELECT selected_image_id FROM scenes WHERE id = ?", scene_id)[0] == images[index]["id"]
         select_button.text = "已选用" if selected else "选用"
@@ -249,18 +278,21 @@ def image_viewer(scene_id: int, images: list, index: int, on_close) -> None:
         image_id = images[index]["id"]
         execute("UPDATE scenes SET selected_image_id = CASE WHEN selected_image_id = ? THEN NULL ELSE ? END "
                 "WHERE id = ?", image_id, image_id, scene_id)
-        show()
+        update()
 
     def delete() -> None:
         nonlocal index
         delete_image(images.pop(index))
+        slides.pop(index).delete()
         if images:
             index = min(index, len(images) - 1)
-            show()
+            update()
         else:
             dialog.close()
 
-    show()
+    track.on("scroll", on_swipe, js_handler=SWIPE_INDEX_JS)
+    dialog.on("show", lambda: go(index, smooth=False))
+    update()
     dialog.open()
 
 
@@ -284,7 +316,7 @@ def candidate_gallery(scene_id: int) -> None:
                 selected = img["id"] == selected_id
                 with ui.element("div").classes("relative cursor-pointer").on(
                         "click", lambda i=i, images=images: open_viewer(list(images), i)):
-                    ui.image(f"/images/{img['filename']}").props("fit=cover").classes(
+                    ui.image(f"/thumbnails/{img['filename']}").props("fit=cover").classes(
                         "aspect-square rounded-lg bg-zinc-200" + (" ring-4 ring-zinc-900" if selected else ""))
                     if selected:
                         ui.badge("已选用", color="positive").classes("absolute top-2 left-2")
