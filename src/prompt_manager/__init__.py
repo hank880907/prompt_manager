@@ -1,8 +1,11 @@
+import asyncio
 from contextlib import suppress
 
-from nicegui import ui
+from nicegui import app, ui
 
 from prompt_manager import api  # noqa: F401  registers API routes
+from prompt_manager.auth import (ADMIN_PASSWORD, ADMIN_USERNAME, add_user, delete_user, is_admin, safe_redirect,
+                                 storage_secret, verify_user)
 from prompt_manager.db import IMAGES_DIR, execute, get, query
 
 CONTAINER = "w-full max-w-3xl mx-auto px-4 py-6 gap-3"
@@ -17,15 +20,29 @@ body { background: #f6f6f7; color: #18181b;
 """
 
 
-def page_frame(*crumbs: tuple[str, str]) -> None:
+def style() -> None:
     ui.colors(primary="#18181b")
     ui.add_css(CSS)
+
+
+def logout() -> None:
+    app.storage.user.clear()
+    ui.navigate.to("/login")
+
+
+def page_frame(*crumbs: tuple[str, str]) -> None:
+    style()
     with ui.header().classes("bg-white text-zinc-900 border-b border-zinc-200 py-3"):
         with ui.row().classes("w-full max-w-3xl mx-auto px-4 items-center no-wrap gap-1"):
             ui.link("提示词管理器", "/").classes("font-semibold no-underline text-zinc-900 shrink-0")
             for name, url in crumbs:
                 ui.icon("chevron_right", color="grey-5")
                 ui.link(name, url).classes("no-underline text-zinc-500 truncate")
+            ui.space()
+            if is_admin(app.storage.user.get("username")):
+                ui.button(icon="manage_accounts", on_click=lambda: ui.navigate.to("/users")
+                          ).props("flat round dense color=grey-7").tooltip("用户管理")
+            ui.button(icon="logout", on_click=logout).props("flat round dense color=grey-7").tooltip("退出登录")
 
 
 def rename_dialog(table: str, row) -> None:
@@ -315,6 +332,73 @@ def scene_page(scene_id: int):
                       ).props("flat dense color=grey-7 no-caps")
 
 
+@ui.page("/users")
+def users_page():
+    if not is_admin(app.storage.user.get("username")):
+        ui.navigate.to("/")
+        return
+    page_frame(("用户管理", "/users"))
+
+    @ui.refreshable
+    def user_list():
+        users = query("SELECT username FROM users ORDER BY username")
+        if not users:
+            empty_state("还没有其他用户")
+        for u in users:
+            with ui.card().classes("w-full p-0"):
+                with ui.row().classes("w-full no-wrap items-center px-4 py-2"):
+                    ui.label(u["username"]).classes("grow font-medium truncate")
+                    ui.button(icon="delete_outline", on_click=lambda name=u["username"]: confirm_delete(
+                        name, lambda: (delete_user(name), user_list.refresh()))
+                              ).props("flat round dense color=grey-6")
+
+    def save():
+        name = username.value.strip()
+        if not name or not password.value:
+            ui.notify("请填写用户名和密码", type="warning")
+        elif is_admin(name):
+            ui.notify("不能使用管理员的用户名", type="warning")
+        else:
+            add_user(name, password.value)
+            ui.notify(f"已保存用户 {name}", type="positive")
+            username.value = password.value = ""
+            user_list.refresh()
+
+    with ui.column().classes(CONTAINER):
+        ui.label("用户管理").classes("text-2xl font-semibold")
+        with ui.card().classes("w-full p-4 gap-2"):
+            username = ui.input("用户名").classes("w-full").props("outlined dense")
+            password = ui.input("密码", password=True, password_toggle_button=True).classes("w-full").props("outlined dense")
+            ui.label("填写已有用户名会重置该用户的密码").classes("text-xs text-zinc-400")
+            ui.button("保存用户", icon="person_add", on_click=save).props("unelevated").classes("w-full rounded-lg")
+        section_label("用户")
+        user_list()
+
+
+@ui.page("/login")
+def login_page(redirect_to: str = "/"):
+    style()
+
+    async def try_login():
+        if verify_user(username.value, password.value):
+            app.storage.user["username"] = username.value
+            ui.navigate.to(safe_redirect(redirect_to))
+        else:
+            await asyncio.sleep(1)
+            ui.notify("用户名或密码错误", type="negative")
+
+    with ui.card().classes("w-full max-w-sm mx-auto mt-24 p-6 gap-4"):
+        ui.label("提示词管理器").classes("text-2xl font-semibold")
+        username = ui.input("用户名").classes("w-full").props("outlined autofocus")
+        password = ui.input("密码", password=True, password_toggle_button=True).classes("w-full").props("outlined")
+        password.on("keydown.enter", try_login, js_handler=ENTER_WITHOUT_IME)
+        ui.button("登录", on_click=try_login).props("unelevated").classes("w-full h-11 rounded-lg")
+
+
 def main() -> None:
+    if not ADMIN_USERNAME or not ADMIN_PASSWORD:
+        print("请在 .env 中设置 ADMIN_USERNAME 和 ADMIN_PASSWORD")
+        return
     with suppress(KeyboardInterrupt):
-        ui.run(title="提示词管理器", language="zh-CN", host="0.0.0.0", port=8080, reload=False)
+        ui.run(title="提示词管理器", language="zh-CN", host="0.0.0.0", port=8080, reload=False,
+               storage_secret=storage_secret())

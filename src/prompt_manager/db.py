@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS scenes (
     position INTEGER NOT NULL DEFAULT 0,
     selected_image_id INTEGER REFERENCES images(id) ON DELETE SET NULL
 );
+CREATE TABLE IF NOT EXISTS users (
+    username TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS images (
     id INTEGER PRIMARY KEY,
     scene_id INTEGER NOT NULL REFERENCES scenes(id) ON DELETE CASCADE,

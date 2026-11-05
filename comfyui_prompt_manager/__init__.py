@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import os
@@ -8,10 +9,14 @@ import numpy as np
 from PIL import Image
 
 SERVER = os.environ.get("PROMPT_MANAGER_URL", "http://localhost:8080")
+CREDENTIALS = f"{os.environ.get('PROMPT_MANAGER_USER', '')}:{os.environ.get('PROMPT_MANAGER_PASSWORD', '')}"
+AUTH_HEADER = "Basic " + base64.b64encode(CREDENTIALS.encode()).decode()
 
 
 def request(path: str, png: bytes | None = None):
-    headers = {"Content-Type": "image/png"} if png else {}
+    headers = {"Authorization": AUTH_HEADER}
+    if png:
+        headers["Content-Type"] = "image/png"
     with urllib.request.urlopen(urllib.request.Request(SERVER + path, data=png, headers=headers), timeout=30) as r:
         return json.loads(r.read())
 

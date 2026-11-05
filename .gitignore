@@ -12,3 +12,6 @@ wheels/
 # App data
 prompts.db
 images/
+secret.key
+.nicegui/
+.env

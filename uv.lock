@@ -880,10 +880,14 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "nicegui" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "nicegui", specifier = ">=3.18.0" }]
+requires-dist = [
+    { name = "nicegui", specifier = ">=3.18.0" },
+    { name = "python-dotenv", specifier = ">=1.2.4" },
+]
 
 [[package]]
 name = "propcache"
