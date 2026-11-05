@@ -183,29 +183,31 @@ def episode_page(episode_id: int):
                        "WHERE s.episode_id = ? ORDER BY s.position", episode_id)
         if not scenes:
             empty_state("还没有场景")
-        with ui.column().classes("w-full gap-2") as container:
-            for i, s in enumerate(scenes, 1):
-                with ui.card().classes("w-full p-0 hover:border-zinc-400 transition-colors") as card:
-                    card.scene_id = s["id"]
-                    with ui.row().classes("w-full no-wrap items-center gap-0"):
-                        ui.icon("drag_indicator", color="grey-5").classes("drag-handle cursor-grab px-2 py-4 text-xl")
-                        with ui.link(target=f"/scene/{s['id']}").classes(
-                                "grow min-w-0 py-2 no-underline text-zinc-900 flex flex-nowrap items-center gap-3"):
-                            if s["thumbnail"]:
-                                ui.image(f"/thumbnails/{s['thumbnail']}").props("fit=cover").classes("w-14 h-14 rounded-md shrink-0")
-                            else:
-                                with ui.element("div").classes("w-14 h-14 rounded-md shrink-0 bg-zinc-100 flex items-center justify-center"):
-                                    ui.icon("image", color="grey-4")
-                            with ui.column().classes("min-w-0 gap-0"):
-                                with ui.row().classes("items-baseline no-wrap gap-2"):
-                                    ui.label(str(i)).classes("text-xs text-zinc-400 shrink-0")
-                                    ui.label(s["name"]).classes("font-medium truncate")
-                                ui.label(preview(s["image_positive"])).classes("text-xs text-zinc-400 truncate max-w-full")
-                        with ui.row().classes("no-wrap items-center gap-1 pl-2 text-xs text-zinc-400 tabular-nums"
-                                              + ("" if s["candidates"] else " opacity-50")):
-                            ui.icon("photo_library").classes("text-base")
-                            ui.label(str(s["candidates"]))
-                        ui.icon("chevron_right", color="grey-5").classes("pr-2")
+        with ui.row().classes("w-full no-wrap gap-2"):
+            with ui.column().classes("gap-2 shrink-0"):
+                for i in range(1, len(scenes) + 1):
+                    ui.label(str(i)).classes("h-[76px] w-5 flex items-center justify-end text-xs text-zinc-400 tabular-nums")
+            with ui.column().classes("grow min-w-0 gap-2") as container:
+                for s in scenes:
+                    with ui.card().classes("w-full h-[76px] p-0 hover:border-zinc-400 transition-colors") as card:
+                        card.scene_id = s["id"]
+                        with ui.row().classes("w-full no-wrap items-center gap-0"):
+                            ui.icon("drag_indicator", color="grey-5").classes("drag-handle cursor-grab px-2 py-4 text-xl")
+                            with ui.link(target=f"/scene/{s['id']}").classes(
+                                    "grow min-w-0 py-2 no-underline text-zinc-900 flex flex-nowrap items-center gap-3"):
+                                if s["thumbnail"]:
+                                    ui.image(f"/thumbnails/{s['thumbnail']}").props("fit=cover").classes("w-14 h-14 rounded-md shrink-0")
+                                else:
+                                    with ui.element("div").classes("w-14 h-14 rounded-md shrink-0 bg-zinc-100 flex items-center justify-center"):
+                                        ui.icon("image", color="grey-4")
+                                with ui.column().classes("min-w-0 gap-0"):
+                                    ui.label(s["name"]).classes("font-medium truncate max-w-full")
+                                    ui.label(preview(s["image_positive"])).classes("text-xs text-zinc-400 truncate max-w-full")
+                            with ui.row().classes("no-wrap items-center gap-1 pl-2 text-xs text-zinc-400 tabular-nums"
+                                                  + ("" if s["candidates"] else " opacity-50")):
+                                ui.icon("photo_library").classes("text-base")
+                                ui.label(str(s["candidates"]))
+                            ui.icon("chevron_right", color="grey-5").classes("pr-2")
 
         def save_order():
             for position, card in enumerate(container.default_slot.children):
