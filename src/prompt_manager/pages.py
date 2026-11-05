@@ -1,10 +1,13 @@
 import asyncio
+import json
+from pathlib import Path
 
 from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
 from prompt_manager.auth import add_user, delete_user, is_admin, owner_of, safe_redirect, verify_user
 from prompt_manager.db import VISIBLE, execute, execute_many, get, query, visible_scene
+from prompt_manager.images import image_size
 
 CONTAINER = "w-full max-w-3xl mx-auto px-4 py-6 gap-3"
 ENTER_WITHOUT_IME = "(e) => { if (!e.isComposing && e.keyCode !== 229) emit() }"
@@ -17,17 +20,21 @@ body { background: #f6f6f7; color: #18181b;
 .q-field--outlined .q-field__control { border-radius: 10px; background: #fff; }
 .q-field--outlined .q-field__control:before { border-color: #e4e4e7; }
 .q-field--readonly .q-field__control { background: #f4f4f5; color: #71717a; }
-.viewer-track { scrollbar-width: none; overscroll-behavior-x: contain; opacity: 0; }
-.viewer-track::-webkit-scrollbar { display: none; }
+div.pswp { --pswp-root-z-index: 5000; }
+div.pswp .pswp__button--download, div.pswp .pswp__button--delete { display: flex; align-items: center; justify-content: center; color: #fff; }
+.pswp__button--download .material-icons, .pswp__button--delete .material-icons { font-size: 24px; }
+.pswp__select { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px;
+                align-items: center; padding: 8px 18px; border: 0; border-radius: 999px; background: #fff;
+                color: #18181b; font-size: 14px; cursor: pointer; }
+.pswp__select.selected { background: #21ba45; color: #fff; }
+.pswp__select .material-icons { font-size: 18px; }
 .segmented { background: #e4e4e7; border-radius: 10px; padding: 2px; }
 .segmented .q-tab { border-radius: 8px; color: #71717a; min-height: 34px; }
 .scene-panels, .scene-panels .q-panel { overflow: visible; }
 .segmented .q-tab--active { color: #18181b; box-shadow: 0 1px 2px rgb(0 0 0 / 0.08); }
 """
-SWIPE_INDEX_JS = """(e) => {
-    const i = String(Math.round(e.target.scrollLeft / e.target.clientWidth));
-    if (i !== e.target.dataset.index) { e.target.dataset.index = i; emit(Number(i)); }
-}"""
+
+app.add_static_files("/static", Path(__file__).parent / "static")
 
 
 def style() -> None:
@@ -316,71 +323,6 @@ def selected_image_id(scene_id: int) -> int | None:
     return get("SELECT selected_image_id FROM scenes WHERE id = ?", scene_id)[0]
 
 
-def image_viewer(scene_id: int, images: list, index: int, on_close) -> None:
-    def on_swipe(e) -> None:
-        nonlocal index
-        index = min(e.args, len(images) - 1)
-        update()
-
-    def go(target: int, smooth: bool = True) -> None:
-        target = max(0, min(target, len(images) - 1))
-        ui.run_javascript(f"const el = getHtmlElement({track.id}); el.style.opacity = 1; "
-                          f"el.scrollTo({{left: {target} * el.clientWidth, behavior: '{'smooth' if smooth else 'instant'}'}})")
-
-    def on_key(e) -> None:
-        if dialog.value and e.action.keydown and (e.key.arrow_left or e.key.arrow_right):
-            go(index + (-1 if e.key.arrow_left else 1))
-
-    def update() -> None:
-        counter.text = f"{index + 1} / {len(images)}"
-        selected = selected_image_id(scene_id) == images[index]["id"]
-        select_button.text = "已选用" if selected else "选用"
-        select_button.props(f"icon={'check_circle' if selected else 'radio_button_unchecked'} "
-                            f"color={'positive' if selected else 'white'} text-color={'white' if selected else 'black'}")
-
-    def toggle_selected() -> None:
-        image_id = images[index]["id"]
-        execute("UPDATE scenes SET selected_image_id = CASE WHEN selected_image_id = ? THEN NULL ELSE ? END "
-                "WHERE id = ?", image_id, image_id, scene_id)
-        update()
-
-    def delete() -> None:
-        nonlocal index
-        execute("DELETE FROM images WHERE id = ?", images.pop(index)["id"])
-        slides.pop(index).delete()
-        if images:
-            index = min(index, len(images) - 1)
-            update()
-        else:
-            dialog.close()
-
-    with ui.dialog().props("maximized").on("hide", on_close) as dialog, \
-            ui.card().classes("w-full h-full bg-black p-0 gap-0 rounded-none"):
-        with ui.row().classes("w-full justify-between items-center no-wrap px-2 py-2"):
-            ui.button(icon="close", on_click=dialog.close).props("flat round color=white")
-            counter = ui.label().classes("text-white text-sm")
-            with ui.row().classes("no-wrap gap-1"):
-                ui.button(icon="download", on_click=lambda: ui.download(f"/images/{images[index]['filename']}")
-                          ).props("flat round color=white").tooltip("下载原图 PNG")
-                ui.button("删除", icon="delete_outline", on_click=lambda: confirm_delete(f"候选图 {index + 1}", delete)
-                          ).props("flat dense color=white no-caps")
-        with ui.element("div").classes(
-                "viewer-track w-full grow min-h-0 flex flex-nowrap overflow-x-auto snap-x snap-mandatory") as track:
-            slides = [ui.image(f"/previews/{img['filename']}")
-                      .props(f"fit=contain placeholder-src=/thumbnails/{img['filename']}")
-                      .classes("w-full h-full shrink-0 snap-center snap-always") for img in images]
-        with ui.row().classes("w-full justify-between items-center no-wrap px-2 py-3"):
-            ui.button(icon="chevron_left", on_click=lambda: go(index - 1)).props("flat round color=white size=lg")
-            select_button = ui.button(on_click=toggle_selected).props("rounded unelevated no-caps")
-            ui.button(icon="chevron_right", on_click=lambda: go(index + 1)).props("flat round color=white size=lg")
-        ui.keyboard(on_key=on_key, ignore=["input", "textarea"])
-
-    track.on("scroll", on_swipe, js_handler=SWIPE_INDEX_JS)
-    dialog.on("show", lambda: go(index, smooth=False))
-    update()
-    dialog.open()
-
-
 def candidate_count(scene_id: int) -> int:
     return get("SELECT COUNT(*) FROM images WHERE scene_id = ?", scene_id)[0]
 
@@ -411,12 +353,21 @@ def candidate_gallery(scene_id: int, on_count):
                         ui.badge("已选用", color="positive").classes("absolute top-2 left-2")
 
     def open_viewer(images: list, index: int) -> None:
-        viewer_slot.clear()
-        with viewer_slot:
-            image_viewer(scene_id, images, index, gallery.refresh)
+        items = [{"id": img["id"], "filename": img["filename"], "src": f"/previews/{img['filename']}",
+                  "msrc": f"/thumbnails/{img['filename']}", **dict(zip(("width", "height"), image_size(img["filename"])))}
+                 for img in images]
+        ui.run_javascript(f"openViewer({json.dumps(items)}, {index}, {json.dumps(selected_image_id(scene_id))})")
 
+    def delete(image_id: int) -> None:
+        execute("DELETE FROM images WHERE id = ?", image_id)
+        ui.run_javascript(f"viewerRemove({image_id})")
+
+    ui.add_head_html('<link rel="stylesheet" href="/static/photoswipe.css">'
+                     '<script type="module" src="/static/viewer.js"></script>')
+    ui.on("viewer_select", lambda e: execute("UPDATE scenes SET selected_image_id = ? WHERE id = ?", e.args, scene_id))
+    ui.on("viewer_delete", lambda e: confirm_delete("这张候选图", lambda: delete(e.args)))
+    ui.on("viewer_closed", gallery.refresh)
     gallery()
-    viewer_slot = ui.element("div")
     ui.timer(5, lambda: candidate_count(scene_id) != shown and gallery.refresh())
     return gallery.refresh
 

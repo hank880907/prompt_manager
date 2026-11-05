@@ -26,6 +26,11 @@ def resized(filename: str, directory: Path, size: int) -> FileResponse:
     return FileResponse(target, media_type="image/webp", headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
 
+def image_size(filename: str) -> tuple[int, int]:
+    with Image.open(IMAGES_DIR / filename) as image:
+        return image.size
+
+
 @app.get("/thumbnails/{filename}")
 def thumbnail(filename: str):
     return resized(filename, THUMBNAILS_DIR, 384)
