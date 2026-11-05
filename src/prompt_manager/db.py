@@ -1,12 +1,18 @@
+import os
 import sqlite3
 from pathlib import Path
 
-IMAGES_DIR = Path("images")
-IMAGES_DIR.mkdir(exist_ok=True)
-THUMBNAILS_DIR = Path("thumbnails")
+from dotenv import load_dotenv
+
+load_dotenv(".env")
+DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parents[2] / "data"))
+os.environ.setdefault("NICEGUI_STORAGE_PATH", str(DATA_DIR / ".nicegui"))
+IMAGES_DIR = DATA_DIR / "images"
+IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+THUMBNAILS_DIR = DATA_DIR / "thumbnails"
 THUMBNAILS_DIR.mkdir(exist_ok=True)
 
-conn = sqlite3.connect("prompts.db", check_same_thread=False)
+conn = sqlite3.connect(DATA_DIR / "prompts.db", check_same_thread=False)
 conn.row_factory = sqlite3.Row
 conn.execute("PRAGMA foreign_keys = ON")
 conn.executescript("""

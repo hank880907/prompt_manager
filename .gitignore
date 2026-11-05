@@ -10,9 +10,5 @@ wheels/
 .venv
 
 # App data
-prompts.db
-images/
-secret.key
-.nicegui/
+data/
 .env
-thumbnails/

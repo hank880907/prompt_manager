@@ -1,12 +1,13 @@
 import asyncio
 from contextlib import suppress
 
+from prompt_manager.db import IMAGES_DIR, execute, get, query  # before nicegui: sets its storage path
+
 from nicegui import app, ui
 
 from prompt_manager.api import thumbnail_path
 from prompt_manager.auth import (ADMIN_PASSWORD, ADMIN_USERNAME, add_user, delete_user, is_admin, safe_redirect,
                                  storage_secret, verify_user)
-from prompt_manager.db import IMAGES_DIR, execute, get, query
 
 CONTAINER = "w-full max-w-3xl mx-auto px-4 py-6 gap-3"
 ENTER_WITHOUT_IME = "(e) => { if (!e.isComposing && e.keyCode !== 229) emit() }"

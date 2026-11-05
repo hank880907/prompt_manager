@@ -4,20 +4,17 @@ import hmac
 import ipaddress
 import os
 import secrets
-from pathlib import Path
 from urllib.parse import quote
 
-from dotenv import load_dotenv
 from fastapi import Request, Response
 from fastapi.responses import RedirectResponse
 from nicegui import app
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from prompt_manager.db import execute, get
+from prompt_manager.db import DATA_DIR, execute, get
 
-SECRET_FILE = Path("secret.key")
+SECRET_FILE = DATA_DIR / "secret.key"
 
-load_dotenv(".env")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 TRUSTED_NETWORKS = [ipaddress.ip_network(n.strip()) for n in os.environ.get("TRUSTED_IPS", "").split(",") if n.strip()]
