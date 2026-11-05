@@ -7,7 +7,7 @@ from prompt_manager.db import execute, execute_many, get, query
 
 CONTAINER = "w-full max-w-3xl mx-auto px-4 py-6 gap-3"
 ENTER_WITHOUT_IME = "(e) => { if (!e.isComposing && e.keyCode !== 229) emit() }"
-PROMPT_COLUMNS = ("image_positive", "image_negative", "video_prompt")
+PROMPT_LABELS = {"image_positive": "图像提示词（正向）", "image_negative": "图像提示词（负向）", "video_prompt": "视频提示词"}
 
 CSS = """
 body { background: #f6f6f7; color: #18181b;
@@ -17,6 +17,10 @@ body { background: #f6f6f7; color: #18181b;
 .q-field--outlined .q-field__control:before { border-color: #e4e4e7; }
 .viewer-track { scrollbar-width: none; overscroll-behavior-x: contain; opacity: 0; }
 .viewer-track::-webkit-scrollbar { display: none; }
+.segmented { background: #e4e4e7; border-radius: 10px; padding: 2px; }
+.segmented .q-tab { border-radius: 8px; color: #71717a; min-height: 34px; }
+.scene-panels, .scene-panels .q-panel { overflow: visible; }
+.segmented .q-tab--active { color: #18181b; box-shadow: 0 1px 2px rgb(0 0 0 / 0.08); }
 """
 SWIPE_INDEX_JS = """(e) => {
     const i = String(Math.round(e.target.scrollLeft / e.target.clientWidth));
@@ -336,33 +340,51 @@ def candidate_gallery(scene_id: int) -> None:
              and gallery.refresh())
 
 
-def prompt_editor(scene) -> None:
-    saved = {column: scene[column] for column in PROMPT_COLUMNS}
+def scene_editor(scene) -> None:
+    saved = {column: scene[column] for column in PROMPT_LABELS}
+    fields = {}
+    save_buttons = []
 
     def set_unsaved(unsaved: bool) -> None:
-        if unsaved != save_button.enabled:
-            save_button.set_enabled(unsaved)
+        if unsaved != save_buttons[0].enabled:
+            for button in save_buttons:
+                button.set_enabled(unsaved)
             ui.run_javascript(f"window.unsavedPrompts = {str(unsaved).lower()}")
 
     def on_edit() -> None:
-        set_unsaved(any(fields[c].value != saved[c] for c in PROMPT_COLUMNS))
+        set_unsaved(any(fields[c].value != saved[c] for c in PROMPT_LABELS))
 
     def save() -> None:
-        saved.update({c: fields[c].value for c in PROMPT_COLUMNS})
+        saved.update({c: fields[c].value for c in PROMPT_LABELS})
         execute("UPDATE scenes SET image_positive = ?, image_negative = ?, video_prompt = ? WHERE id = ?",
                 *saved.values(), scene["id"])
         set_unsaved(False)
         ui.notify("已保存", type="positive")
 
+    def prompt_fields(*columns: str) -> None:
+        for i, column in enumerate(columns):
+            with ui.row().classes("w-full items-end justify-between no-wrap mt-2"):
+                ui.label(PROMPT_LABELS[column]).classes("text-xs font-medium text-zinc-500")
+                if i == 0:
+                    save_buttons.append(ui.button("保存", icon="save", on_click=save).props("unelevated dense")
+                                        .classes("px-3 rounded-lg"))
+                    save_buttons[-1].disable()
+            fields[column] = ui.textarea(value=scene[column], on_change=on_edit).classes("w-full").props("outlined autogrow")
+
     ui.add_body_html("<script>window.addEventListener('beforeunload', "
                      "e => { if (window.unsavedPrompts) e.preventDefault() })</script>")
 
-    fields = {}
-    for label, column in zip(("图像提示词（正向）", "图像提示词（负向）", "视频提示词"), PROMPT_COLUMNS):
-        ui.label(label).classes("text-xs font-medium text-zinc-500 mt-2")
-        fields[column] = ui.textarea(value=scene[column], on_change=on_edit).classes("w-full").props("outlined autogrow")
-    save_button = ui.button("保存", icon="save", on_click=save).props("unelevated").classes("self-end mt-2 rounded-lg")
-    save_button.disable()
+    with ui.tabs().props("dense no-caps inline-label align=justify active-bg-color=white indicator-color=transparent"
+                         ).classes("segmented w-full mt-3") as tabs:
+        image_tab = ui.tab("图像", icon="image")
+        video_tab = ui.tab("视频", icon="movie")
+    with ui.tab_panels(tabs, value=image_tab).props("transition-prev=fade transition-next=fade transition-duration=150"
+                                                   ).classes("scene-panels w-full bg-transparent"):
+        with ui.tab_panel(image_tab).classes("p-0 gap-1"):
+            prompt_fields("image_positive", "image_negative")
+            candidate_gallery(scene["id"])
+        with ui.tab_panel(video_tab).classes("p-0 gap-1"):
+            prompt_fields("video_prompt")
 
 
 @ui.page("/scene/{scene_id}")
@@ -379,8 +401,7 @@ def scene_page(scene_id: int):
         ui.button("返回场景列表", icon="arrow_back", on_click=lambda: ui.navigate.to(episode_url)
                   ).props("flat dense color=grey-8 no-caps").classes("-ml-2")
         title_row(scene["name"], lambda name: execute("UPDATE scenes SET name = ? WHERE id = ?", name, scene_id))
-        prompt_editor(scene)
-        candidate_gallery(scene_id)
+        scene_editor(scene)
         ui.button("删除场景", icon="delete_outline", on_click=lambda: confirm_delete(scene["name"], delete)
                   ).props("flat dense color=grey-7 no-caps").classes("self-end mt-4")
 
