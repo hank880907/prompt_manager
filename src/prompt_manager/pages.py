@@ -154,15 +154,13 @@ def confirm_delete(name: str, on_confirm) -> None:
     dialog.open()
 
 
-def add_row(placeholder: str, on_add, with_private: bool = False) -> None:
-    """With `with_private`, also shows a private switch and calls on_add(name, private)."""
+def add_row(placeholder: str, on_add) -> None:
     with ui.row().classes("w-full no-wrap items-center gap-2"):
         name = ui.input(placeholder=placeholder).classes("grow").props("outlined dense")
-        switch = ui.switch("私有").props("dense") if with_private else None
 
         def submit():
             if name.value.strip():
-                on_add(name.value.strip(), *([] if switch is None else [switch.value]))
+                on_add(name.value.strip())
                 name.value = ""
 
         name.on("keydown.enter", submit, js_handler=ENTER_WITHOUT_IME)
@@ -188,18 +186,33 @@ def projects_page():
         projects = query(f"SELECT p.*, COUNT(e.id) AS n FROM projects p LEFT JOIN episodes e ON e.project_id = p.id "
                          f"WHERE {VISIBLE} GROUP BY p.id ORDER BY p.id DESC", current_owner(), current_owner())
         if not projects:
-            empty_state("还没有项目，在上方新建一个吧")
+            empty_state("还没有项目，点右上角的 + 新建一个吧")
         for p in projects:
             item_row(p["name"], f"{p['n']} 个剧集" + (" · 私有" if p["owner"] is not None else ""), f"/project/{p['id']}",
                      lambda p=p: (execute("DELETE FROM projects WHERE id = ?", p["id"]), project_list.refresh()))
 
-    def add(name, private):
-        execute("INSERT INTO projects (name, owner) VALUES (?, ?)", name, current_owner() if private else None)
-        project_list.refresh()
+    def new_project_dialog() -> None:
+        def create():
+            if name.value.strip():
+                execute("INSERT INTO projects (name, owner) VALUES (?, ?)",
+                        name.value.strip(), current_owner() if private.value else None)
+                dialog.close()
+                project_list.refresh()
+
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-sm p-6 gap-4"):
+            ui.label("新建项目").classes("text-lg font-semibold")
+            name = ui.input(placeholder="项目名称").classes("w-full").props("outlined dense autofocus")
+            name.on("keydown.enter", create, js_handler=ENTER_WITHOUT_IME)
+            private = ui.checkbox("私有（仅自己可见）").props("dense")
+            with ui.row().classes("w-full justify-end"):
+                ui.button("取消", on_click=dialog.close).props("flat color=grey-8")
+                ui.button("新建", on_click=create).props("unelevated")
+        dialog.open()
 
     with ui.column().classes(CONTAINER):
-        ui.label("项目").classes("text-2xl font-semibold")
-        add_row("项目名称", add, with_private=True)
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("项目").classes("text-2xl font-semibold")
+            ui.button(icon="add", on_click=new_project_dialog).props("unelevated dense").classes("px-3 rounded-lg").tooltip("新建项目")
         project_list()
 
 
