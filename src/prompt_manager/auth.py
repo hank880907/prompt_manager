@@ -2,22 +2,19 @@ import base64
 import hashlib
 import hmac
 import ipaddress
-import os
 import secrets
 from urllib.parse import quote
 
 from fastapi import Request, Response
 from fastapi.responses import RedirectResponse
-from nicegui import app
+from nicegui import app, run
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from prompt_manager.db import DATA_DIR, execute, get
+from prompt_manager.config import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, TRUSTED_NETWORKS
+from prompt_manager.db import execute, get
 
 SECRET_FILE = DATA_DIR / "secret.key"
-
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
-TRUSTED_NETWORKS = [ipaddress.ip_network(n.strip()) for n in os.environ.get("TRUSTED_IPS", "").split(",") if n.strip()]
+verified_headers: set[str] = set()
 
 
 def storage_secret() -> str:
@@ -34,10 +31,12 @@ def add_user(username: str, password: str) -> None:
     salt = secrets.token_bytes(16)
     execute("INSERT OR REPLACE INTO users (username, password_hash) VALUES (?, ?)",
             username, f"{salt.hex()}${hash_password(password, salt).hex()}")
+    verified_headers.clear()
 
 
 def delete_user(username: str) -> None:
     execute("DELETE FROM users WHERE username = ?", username)
+    verified_headers.clear()
 
 
 def is_admin(username: str | None) -> bool:
@@ -68,6 +67,12 @@ def verify_basic_auth(header: str) -> bool:
     return verify_user(username, password)
 
 
+async def check_basic_auth(header: str) -> bool:
+    if header not in verified_headers and await run.io_bound(verify_basic_auth, header):
+        verified_headers.add(header)
+    return header in verified_headers
+
+
 def is_trusted(request: Request) -> bool:
     try:
         ip = ipaddress.ip_address(request.client.host if request.client else "")
@@ -84,7 +89,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if path.startswith("/api/"):
-            if not is_trusted(request) and not verify_basic_auth(request.headers.get("authorization", "")):
+            if not is_trusted(request) and not await check_basic_auth(request.headers.get("authorization", "")):
                 return Response(status_code=401, headers={"WWW-Authenticate": "Basic"})
         elif path != "/login" and not path.startswith("/_nicegui") and not user_exists(app.storage.user.get("username")):
             app.storage.user.clear()

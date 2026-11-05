@@ -4,7 +4,7 @@
 2. Run: `uv run prompt-manager`, then open `http://<host>:8080`.
 3. Log in as admin and add users from the user management page (person icon, top right).
 
-All app data (`prompts.db`, `images/`, `thumbnails/`, `secret.key`, `.nicegui/`) lives in `DATA_DIR`, `data/` in the repo by default. `.env` is always read from the current folder.
+All app data (`prompts.db`, `images/`, `thumbnails/`, `previews/`, `secret.key`, `.nicegui/`) lives in `DATA_DIR`, `data/` in the repo by default. `.env` is always read from the current folder.
 
 Put HTTPS in front of it (e.g. Caddy) before exposing it publicly; otherwise passwords are sent in plain text.
 
