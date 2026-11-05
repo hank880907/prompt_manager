@@ -15,6 +15,7 @@ body { background: #f6f6f7; color: #18181b;
 .q-card { box-shadow: none; border: 1px solid #e4e4e7; border-radius: 12px; }
 .q-field--outlined .q-field__control { border-radius: 10px; background: #fff; }
 .q-field--outlined .q-field__control:before { border-color: #e4e4e7; }
+.q-field--readonly .q-field__control { background: #f4f4f5; color: #71717a; }
 .viewer-track { scrollbar-width: none; overscroll-behavior-x: contain; opacity: 0; }
 .viewer-track::-webkit-scrollbar { display: none; }
 .segmented { background: #e4e4e7; border-radius: 10px; padding: 2px; }
@@ -305,7 +306,11 @@ def image_viewer(scene_id: int, images: list, index: int, on_close) -> None:
     dialog.open()
 
 
-def candidate_gallery(scene_id: int) -> None:
+def candidate_count(scene_id: int) -> int:
+    return get("SELECT COUNT(*) FROM images WHERE scene_id = ?", scene_id)[0]
+
+
+def candidate_gallery(scene_id: int, on_count):
     shown = 0
 
     @ui.refreshable
@@ -314,6 +319,7 @@ def candidate_gallery(scene_id: int) -> None:
         images = query("SELECT * FROM images WHERE scene_id = ? ORDER BY id DESC", scene_id)
         selected_id = selected_image_id(scene_id)
         shown = len(images)
+        on_count(shown)
         section_label(f"候选图（{len(images)}）")
         if not images:
             empty_state("还没有候选图，在 ComfyUI 中用“保存候选图”节点生成")
@@ -336,14 +342,15 @@ def candidate_gallery(scene_id: int) -> None:
 
     gallery()
     viewer_slot = ui.element("div")
-    ui.timer(5, lambda: get("SELECT COUNT(*) FROM images WHERE scene_id = ?", scene_id)[0] != shown
-             and gallery.refresh())
+    ui.timer(5, lambda: candidate_count(scene_id) != shown and gallery.refresh())
+    return gallery.refresh
 
 
 def scene_editor(scene) -> None:
     saved = {column: scene[column] for column in PROMPT_LABELS}
     fields = {}
     save_buttons = []
+    image_columns = ("image_positive", "image_negative")
 
     def set_unsaved(unsaved: bool) -> None:
         if unsaved != save_buttons[0].enabled:
@@ -354,7 +361,28 @@ def scene_editor(scene) -> None:
     def on_edit() -> None:
         set_unsaved(any(fields[c].value != saved[c] for c in PROMPT_LABELS))
 
+    def unlock_when_empty(count: int) -> None:
+        if count == 0:
+            lock_notice.set_visibility(False)
+            for column in image_columns:
+                fields[column].props(remove="readonly")
+
+    def copy_scene() -> None:
+        execute("UPDATE scenes SET position = position + 1 WHERE episode_id = ? AND position > ?",
+                scene["episode_id"], scene["position"])
+        scene_id = execute("INSERT INTO scenes (episode_id, name, position, image_positive, image_negative, video_prompt) "
+                           "SELECT episode_id, name || ' 副本', position + 1, image_positive, image_negative, video_prompt "
+                           "FROM scenes WHERE id = ?", scene["id"])
+        ui.navigate.to(f"/scene/{scene_id}")
+
+    def delete_candidates() -> None:
+        execute("DELETE FROM images WHERE scene_id = ?", scene["id"])
+        refresh_gallery()
+
     def save() -> None:
+        if any(fields[c].value != saved[c] for c in image_columns) and candidate_count(scene["id"]):
+            ui.notify("已有候选图，图像提示词无法保存。可先复制文字，刷新后用“复制场景”新建场景再粘贴。", type="warning")
+            return
         saved.update({c: fields[c].value for c in PROMPT_LABELS})
         execute("UPDATE scenes SET image_positive = ?, image_negative = ?, video_prompt = ? WHERE id = ?",
                 *saved.values(), scene["id"])
@@ -370,6 +398,8 @@ def scene_editor(scene) -> None:
                                         .classes("px-3 rounded-lg"))
                     save_buttons[-1].disable()
             fields[column] = ui.textarea(value=scene[column], on_change=on_edit).classes("w-full").props("outlined autogrow")
+            if locked and column in image_columns:
+                fields[column].props("readonly")
 
     ui.add_body_html("<script>window.addEventListener('beforeunload', "
                      "e => { if (window.unsavedPrompts) e.preventDefault() })</script>")
@@ -381,8 +411,20 @@ def scene_editor(scene) -> None:
     with ui.tab_panels(tabs, value=image_tab).props("transition-prev=fade transition-next=fade transition-duration=150"
                                                    ).classes("scene-panels w-full bg-transparent"):
         with ui.tab_panel(image_tab).classes("p-0 gap-1"):
-            prompt_fields("image_positive", "image_negative")
-            candidate_gallery(scene["id"])
+            locked = candidate_count(scene["id"]) > 0
+            with ui.column().classes("w-full gap-1 mt-3 px-3 pt-2 pb-1 rounded-lg bg-amber-50 text-amber-900 text-xs"
+                                     ) as lock_notice:
+                with ui.row().classes("w-full items-center no-wrap gap-2"):
+                    ui.icon("lock", size="16px")
+                    ui.label("已有候选图，图像提示词不可编辑。如需修改，请删除全部候选图，或复制场景。")
+                with ui.row().classes("w-full justify-end gap-1"):
+                    ui.button("删除全部候选图", icon="delete_sweep", on_click=lambda: confirm_delete(
+                        "全部候选图", delete_candidates)).props("flat dense no-caps color=amber-10")
+                    ui.button("复制场景", icon="content_copy", on_click=copy_scene
+                              ).props("flat dense no-caps color=amber-10")
+            lock_notice.set_visibility(locked)
+            prompt_fields(*image_columns)
+            refresh_gallery = candidate_gallery(scene["id"], unlock_when_empty)
         with ui.tab_panel(video_tab).classes("p-0 gap-1"):
             prompt_fields("video_prompt")
 
