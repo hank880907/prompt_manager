@@ -15,6 +15,7 @@ from prompt_manager.db import execute, get
 
 SECRET_FILE = DATA_DIR / "secret.key"
 verified_headers: set[str] = set()
+ADMIN_OWNER = ""  # usernames can't be empty
 
 
 def storage_secret() -> str:
@@ -36,11 +37,17 @@ def add_user(username: str, password: str) -> None:
 
 def delete_user(username: str) -> None:
     execute("DELETE FROM users WHERE username = ?", username)
+    execute("DELETE FROM projects WHERE owner = ?", username)
     verified_headers.clear()
 
 
 def is_admin(username: str | None) -> bool:
     return bool(ADMIN_USERNAME) and username == ADMIN_USERNAME
+
+
+def owner_of(username: str | None) -> str | None:
+    """Private projects store the admin as ADMIN_OWNER, so renaming the admin in .env keeps them."""
+    return ADMIN_OWNER if is_admin(username) else username
 
 
 def user_exists(username: str | None) -> bool:
@@ -57,14 +64,16 @@ def verify_user(username: str, password: str) -> bool:
     return hmac.compare_digest(hash_password(password, bytes.fromhex(salt)).hex(), expected)
 
 
-def verify_basic_auth(header: str) -> bool:
-    if not header.startswith("Basic "):
-        return False
+def parse_basic_auth(header: str) -> tuple[str, str]:
     try:
-        username, _, password = base64.b64decode(header[6:]).decode().partition(":")
+        username, _, password = base64.b64decode(header.removeprefix("Basic ")).decode().partition(":")
     except ValueError:
-        return False
-    return verify_user(username, password)
+        return "", ""
+    return username, password
+
+
+def verify_basic_auth(header: str) -> bool:
+    return header.startswith("Basic ") and verify_user(*parse_basic_auth(header))
 
 
 async def check_basic_auth(header: str) -> bool:
@@ -89,7 +98,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if path.startswith("/api/"):
-            if not is_trusted(request) and not await check_basic_auth(request.headers.get("authorization", "")):
+            header = request.headers.get("authorization", "")
+            if is_trusted(request):
+                request.state.owner = None
+            elif await check_basic_auth(header):
+                request.state.owner = owner_of(parse_basic_auth(header)[0])
+            else:
                 return Response(status_code=401, headers={"WWW-Authenticate": "Basic"})
         elif path != "/login" and not path.startswith("/_nicegui") and not user_exists(app.storage.user.get("username")):
             app.storage.user.clear()

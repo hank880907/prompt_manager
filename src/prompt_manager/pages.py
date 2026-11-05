@@ -1,9 +1,10 @@
 import asyncio
 
+from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
-from prompt_manager.auth import add_user, delete_user, is_admin, safe_redirect, verify_user
-from prompt_manager.db import execute, execute_many, get, query
+from prompt_manager.auth import add_user, delete_user, is_admin, owner_of, safe_redirect, verify_user
+from prompt_manager.db import VISIBLE, execute, execute_many, get, query, visible_scene
 
 CONTAINER = "w-full max-w-3xl mx-auto px-4 py-6 gap-3"
 ENTER_WITHOUT_IME = "(e) => { if (!e.isComposing && e.keyCode !== 229) emit() }"
@@ -34,6 +35,14 @@ def style() -> None:
     ui.add_css(CSS)
 
 
+def current_user() -> str:
+    return app.storage.user.get("username")
+
+
+def current_owner() -> str:
+    return owner_of(current_user())
+
+
 def logout() -> None:
     app.storage.user.clear()
     ui.navigate.to("/login")
@@ -48,10 +57,36 @@ def page_frame(*crumbs: tuple[str, str]) -> None:
                 ui.icon("chevron_right", color="grey-5")
                 ui.link(name, url).classes("no-underline text-zinc-500 truncate")
             ui.space()
-            if is_admin(app.storage.user.get("username")):
-                ui.button(icon="manage_accounts", on_click=lambda: ui.navigate.to("/users")
-                          ).props("flat round dense color=grey-7").tooltip("用户管理")
-            ui.button(icon="logout", on_click=logout).props("flat round dense color=grey-7").tooltip("退出登录")
+            username = current_user()
+            with ui.button(username, icon="account_circle").props("flat dense no-caps color=grey-8"
+                                                                   ).classes("shrink-0 max-w-[40%] truncate"):
+                with ui.menu().props("anchor='bottom right' self='top right'"):
+                    if is_admin(username):
+                        ui.menu_item("用户管理", on_click=lambda: ui.navigate.to("/users"))
+                    else:
+                        ui.menu_item("修改密码", on_click=lambda: password_dialog(username))
+                    ui.menu_item("退出登录", on_click=logout)
+
+
+def password_dialog(username: str) -> None:
+    async def save():
+        if not await run.io_bound(verify_user, username, current.value):
+            ui.notify("当前密码错误", type="negative")
+        elif not new.value:
+            ui.notify("请填写新密码", type="warning")
+        else:
+            await run.io_bound(add_user, username, new.value)
+            dialog.close()
+            ui.notify("密码已修改", type="positive")
+
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-sm p-6 gap-4"):
+        ui.label("修改密码").classes("text-lg font-semibold")
+        current = ui.input("当前密码", password=True).classes("w-full").props("outlined dense autofocus")
+        new = ui.input("新密码", password=True, password_toggle_button=True).classes("w-full").props("outlined dense")
+        with ui.row().classes("w-full justify-end"):
+            ui.button("取消", on_click=dialog.close).props("flat color=grey-8")
+            ui.button("保存", on_click=save).props("unelevated")
+    dialog.open()
 
 
 def episode_crumbs(episode_id: int) -> list[tuple[str, str]]:
@@ -60,10 +95,25 @@ def episode_crumbs(episode_id: int) -> list[tuple[str, str]]:
     return [(row["project"], f"/project/{row['id']}"), (row["episode"], f"/episode/{episode_id}")]
 
 
-def rename_dialog(current: str, on_save) -> None:
+def make_public_dialog(on_confirm) -> None:
+    with ui.dialog() as dialog, ui.card().classes("p-6 gap-4"):
+        ui.label("设为公开？").classes("text-lg font-semibold")
+        ui.label("公开后所有人都能看到和编辑这个项目，且无法再改回私有。").classes("text-zinc-500")
+        with ui.row().classes("w-full justify-end"):
+            ui.button("取消", on_click=dialog.close).props("flat color=grey-8")
+            ui.button("设为公开", on_click=lambda: (on_confirm(), ui.navigate.reload())).props("unelevated")
+    dialog.open()
+
+
+def rename_dialog(current: str, on_save, on_make_public=None) -> None:
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-sm p-6 gap-4"):
-        ui.label("重命名").classes("text-lg font-semibold")
+        ui.label("编辑项目" if on_make_public else "重命名").classes("text-lg font-semibold")
         name = ui.input(value=current).classes("w-full").props("outlined dense autofocus")
+        if on_make_public:
+            with ui.row().classes("w-full items-center justify-between no-wrap"):
+                ui.label("私有项目，仅自己可见").classes("text-sm text-zinc-500")
+                ui.button("设为公开", icon="public", on_click=lambda: make_public_dialog(on_make_public)
+                          ).props("outline dense no-caps").classes("px-2")
 
         def save():
             if name.value.strip():
@@ -77,10 +127,13 @@ def rename_dialog(current: str, on_save) -> None:
     dialog.open()
 
 
-def title_row(name: str, on_rename) -> None:
+def title_row(name: str, on_rename, on_make_public=None) -> None:
+    """Pass `on_make_public` for a private project: shows a lock and a make-public button when editing."""
     with ui.row().classes("w-full items-center no-wrap gap-1"):
         ui.label(name).classes("text-2xl font-semibold truncate")
-        ui.button(icon="edit", on_click=lambda: rename_dialog(name, on_rename)).props("flat round dense color=grey-6")
+        if on_make_public:
+            ui.icon("lock", color="grey-6").tooltip("私有项目")
+        ui.button(icon="edit", on_click=lambda: rename_dialog(name, on_rename, on_make_public)).props("flat round dense color=grey-6")
 
 
 def section_label(text: str) -> None:
@@ -101,13 +154,15 @@ def confirm_delete(name: str, on_confirm) -> None:
     dialog.open()
 
 
-def add_row(placeholder: str, on_add) -> None:
+def add_row(placeholder: str, on_add, with_private: bool = False) -> None:
+    """With `with_private`, also shows a private switch and calls on_add(name, private)."""
     with ui.row().classes("w-full no-wrap items-center gap-2"):
         name = ui.input(placeholder=placeholder).classes("grow").props("outlined dense")
+        switch = ui.switch("私有").props("dense") if with_private else None
 
         def submit():
             if name.value.strip():
-                on_add(name.value.strip())
+                on_add(name.value.strip(), *([] if switch is None else [switch.value]))
                 name.value = ""
 
         name.on("keydown.enter", submit, js_handler=ENTER_WITHOUT_IME)
@@ -130,27 +185,29 @@ def projects_page():
 
     @ui.refreshable
     def project_list():
-        projects = query("SELECT p.*, COUNT(e.id) AS n FROM projects p LEFT JOIN episodes e ON e.project_id = p.id "
-                         "GROUP BY p.id ORDER BY p.id DESC")
+        projects = query(f"SELECT p.*, COUNT(e.id) AS n FROM projects p LEFT JOIN episodes e ON e.project_id = p.id "
+                         f"WHERE {VISIBLE} GROUP BY p.id ORDER BY p.id DESC", current_owner(), current_owner())
         if not projects:
             empty_state("还没有项目，在上方新建一个吧")
         for p in projects:
-            item_row(p["name"], f"{p['n']} 个剧集", f"/project/{p['id']}",
+            item_row(p["name"], f"{p['n']} 个剧集" + (" · 私有" if p["owner"] is not None else ""), f"/project/{p['id']}",
                      lambda p=p: (execute("DELETE FROM projects WHERE id = ?", p["id"]), project_list.refresh()))
 
-    def add(name):
-        execute("INSERT INTO projects (name) VALUES (?)", name)
+    def add(name, private):
+        execute("INSERT INTO projects (name, owner) VALUES (?, ?)", name, current_owner() if private else None)
         project_list.refresh()
 
     with ui.column().classes(CONTAINER):
         ui.label("项目").classes("text-2xl font-semibold")
-        add_row("项目名称", add)
+        add_row("项目名称", add, with_private=True)
         project_list()
 
 
 @ui.page("/project/{project_id}")
 def project_page(project_id: int):
-    project = get("SELECT * FROM projects WHERE id = ?", project_id)
+    project = get(f"SELECT * FROM projects p WHERE id = ? AND {VISIBLE}", project_id, current_owner(), current_owner())
+    if not project:
+        return RedirectResponse("/")
     page_frame((project["name"], f"/project/{project_id}"))
 
     @ui.refreshable
@@ -168,7 +225,9 @@ def project_page(project_id: int):
         episode_list.refresh()
 
     with ui.column().classes(CONTAINER):
-        title_row(project["name"], lambda name: execute("UPDATE projects SET name = ? WHERE id = ?", name, project_id))
+        title_row(project["name"], lambda name: execute("UPDATE projects SET name = ? WHERE id = ?", name, project_id),
+                  on_make_public=None if project["owner"] is None else (
+                      lambda: execute("UPDATE projects SET owner = NULL WHERE id = ?", project_id)))
         section_label("剧集")
         add_row("剧集名称，例如：第 1 集", add)
         episode_list()
@@ -180,7 +239,10 @@ def preview(text: str) -> str:
 
 @ui.page("/episode/{episode_id}")
 def episode_page(episode_id: int):
-    episode = get("SELECT * FROM episodes WHERE id = ?", episode_id)
+    episode = get(f"SELECT e.* FROM episodes e JOIN projects p ON p.id = e.project_id WHERE e.id = ? AND {VISIBLE}",
+                  episode_id, current_owner(), current_owner())
+    if not episode:
+        return RedirectResponse("/")
     page_frame(*episode_crumbs(episode_id))
 
     @ui.refreshable
@@ -431,7 +493,9 @@ def scene_editor(scene) -> None:
 
 @ui.page("/scene/{scene_id}")
 def scene_page(scene_id: int):
-    scene = get("SELECT * FROM scenes WHERE id = ?", scene_id)
+    scene = visible_scene(scene_id, current_owner(), "s.*")
+    if not scene:
+        return RedirectResponse("/")
     episode_url = f"/episode/{scene['episode_id']}"
     page_frame(*episode_crumbs(scene["episode_id"]))
 
@@ -450,7 +514,7 @@ def scene_page(scene_id: int):
 
 @ui.page("/users")
 def users_page():
-    if not is_admin(app.storage.user.get("username")):
+    if not is_admin(current_user()):
         ui.navigate.to("/")
         return
     page_frame(("用户管理", "/users"))

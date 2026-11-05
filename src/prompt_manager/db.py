@@ -10,7 +10,8 @@ conn.execute("PRAGMA synchronous = NORMAL")
 conn.executescript("""
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL
+    name TEXT NOT NULL,
+    owner TEXT  -- set only on private projects
 );
 CREATE TABLE IF NOT EXISTS episodes (
     id INTEGER PRIMARY KEY,
@@ -37,6 +38,10 @@ CREATE TABLE IF NOT EXISTS images (
     filename TEXT NOT NULL
 );
 """)
+project_columns = [c["name"] for c in conn.execute("PRAGMA table_info(projects)")]
+if "owner" not in project_columns:
+    with conn:
+        conn.execute("ALTER TABLE projects ADD COLUMN owner TEXT")
 scene_columns = [c["name"] for c in conn.execute("PRAGMA table_info(scenes)")]
 if "position" not in scene_columns:
     with conn:
@@ -45,6 +50,10 @@ if "position" not in scene_columns:
 if "selected_image_id" not in scene_columns:
     with conn:
         conn.execute("ALTER TABLE scenes ADD COLUMN selected_image_id INTEGER REFERENCES images(id) ON DELETE SET NULL")
+
+
+# Pass the owner twice; None (trusted API caller) sees everything.
+VISIBLE = "(p.owner IS NULL OR ? IS NULL OR p.owner = ?)"
 
 
 def query(sql: str, *args) -> list[sqlite3.Row]:
@@ -58,6 +67,11 @@ def get(sql: str, *args) -> sqlite3.Row | None:
 def execute(sql: str, *args) -> int:
     with conn:
         return conn.execute(sql, args).lastrowid
+
+
+def visible_scene(scene_id: int, owner: str | None, columns: str = "s.id") -> sqlite3.Row | None:
+    return get(f"SELECT {columns} FROM scenes s JOIN episodes e ON e.id = s.episode_id "
+               f"JOIN projects p ON p.id = e.project_id WHERE s.id = ? AND {VISIBLE}", scene_id, owner, owner)
 
 
 def execute_many(sql: str, rows: list[tuple]) -> None:
