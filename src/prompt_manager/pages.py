@@ -538,13 +538,42 @@ def characters_page(project_id: int):
 
     @ui.refreshable
     def character_list():
-        characters = query("SELECT c.*, COUNT(i.id) AS n FROM characters c LEFT JOIN character_images i "
-                           "ON i.character_id = c.id WHERE c.project_id = ? GROUP BY c.id ORDER BY c.id", project_id)
+        characters = query(
+            "SELECT c.id, c.name, COUNT(i.id) AS n, "
+            "MAX(CASE WHEN i.view = 'front' AND i.selected THEN i.filename END) AS thumbnail, "
+            "COUNT(DISTINCT CASE WHEN i.view != 'front' THEN i.view END) AS views "
+            "FROM characters c LEFT JOIN character_images i ON i.character_id = c.id "
+            "WHERE c.project_id = ? GROUP BY c.id ORDER BY c.id", project_id)
         if not characters:
             empty_state("还没有角色")
+        total_views = len(VIEWS) - 1
         for c in characters:
-            item_row(c["name"], f"#{c['id']} · {c['n']} 张图", f"/character/{c['id']}",
-                     lambda c=c: (execute("DELETE FROM characters WHERE id = ?", c["id"]), character_list.refresh()))
+            def delete(c=c):
+                execute("DELETE FROM characters WHERE id = ?", c["id"])
+                character_list.refresh()
+
+            with ui.card().classes("w-full p-0 hover:border-zinc-400 transition-colors"):
+                with ui.row().classes("w-full no-wrap items-center pr-2"):
+                    with ui.link(target=f"/character/{c['id']}").classes(
+                            "grow min-w-0 p-2 no-underline text-zinc-900 flex flex-nowrap items-center gap-3"):
+                        if c["thumbnail"]:
+                            ui.image(f"/thumbnails/{c['thumbnail']}").props("fit=cover").classes("w-12 h-16 rounded-md shrink-0")
+                        else:
+                            with ui.element("div").classes("w-12 h-16 rounded-md shrink-0 bg-zinc-100 flex items-center justify-center"):
+                                ui.icon("person_outline", color="grey-4")
+                        with ui.column().classes("min-w-0 gap-0"):
+                            ui.label(c["name"]).classes("font-medium truncate max-w-full")
+                            ui.label(f"#{c['id']} · {c['n']} 张图").classes("text-xs text-zinc-400")
+                            if not c["thumbnail"]:
+                                status, color = "未选正面图", "bg-zinc-100 text-zinc-500"
+                            elif c["views"] == total_views:
+                                status, color = "多视角完成", "bg-green-100 text-green-700"
+                            else:
+                                status, color = f"多视角 {c['views']}/{total_views}", "bg-zinc-100 text-zinc-500"
+                            ui.label(status).classes(f"text-[11px] px-2 py-0.5 mt-1.5 rounded-full {color}")
+                    ui.button(icon="delete_outline", on_click=lambda c=c, delete=delete: confirm_delete(c["name"], delete)
+                              ).props("flat round dense color=grey-6")
+                    ui.icon("chevron_right", color="grey-5")
 
     def add(name):
         character_id = execute("INSERT INTO characters (project_id, name) VALUES (?, ?)", project_id, name)
