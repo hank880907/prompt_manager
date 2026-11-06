@@ -11,6 +11,7 @@ from prompt_manager.images import image_size
 
 CONTAINER = "w-full max-w-3xl mx-auto px-4 py-6 gap-3"
 ENTER_WITHOUT_IME = "(e) => { if (!e.isComposing && e.keyCode !== 229) emit() }"
+ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9"]
 PROMPT_LABELS = {"image_positive": "图像提示词（正向）", "image_negative": "图像提示词（负向）", "video_prompt": "视频提示词"}
 
 CSS = """
@@ -112,15 +113,10 @@ def make_public_dialog(on_confirm) -> None:
     dialog.open()
 
 
-def rename_dialog(current: str, on_save, on_make_public=None) -> None:
+def rename_dialog(current: str, on_save) -> None:
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-sm p-6 gap-4"):
-        ui.label("编辑项目" if on_make_public else "重命名").classes("text-lg font-semibold")
+        ui.label("重命名").classes("text-lg font-semibold")
         name = ui.input(value=current).classes("w-full").props("outlined dense autofocus")
-        if on_make_public:
-            with ui.row().classes("w-full items-center justify-between no-wrap"):
-                ui.label("私有项目，仅自己可见").classes("text-sm text-zinc-500")
-                ui.button("设为公开", icon="public", on_click=lambda: make_public_dialog(on_make_public)
-                          ).props("outline dense no-caps").classes("px-2")
 
         def save():
             if name.value.strip():
@@ -134,13 +130,38 @@ def rename_dialog(current: str, on_save, on_make_public=None) -> None:
     dialog.open()
 
 
-def title_row(name: str, on_rename, on_make_public=None) -> None:
-    """Pass `on_make_public` for a private project: shows a lock and a make-public button when editing."""
+def project_dialog(project) -> None:
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-sm p-6 gap-4"):
+        ui.label("编辑项目").classes("text-lg font-semibold")
+        name = ui.input("项目名称", value=project["name"]).classes("w-full").props("outlined dense autofocus")
+        aspect_ratio = ui.select(ASPECT_RATIOS, label="新场景默认画幅比例", value=project["default_aspect_ratio"]
+                                 ).classes("w-full").props("outlined dense")
+        if project["owner"] is not None:
+            with ui.row().classes("w-full items-center justify-between no-wrap"):
+                ui.label("私有项目，仅自己可见").classes("text-sm text-zinc-500")
+                ui.button("设为公开", icon="public", on_click=lambda: make_public_dialog(lambda: execute(
+                    "UPDATE projects SET owner = NULL WHERE id = ?", project["id"]))
+                          ).props("outline dense no-caps").classes("px-2")
+
+        def save():
+            if name.value.strip():
+                execute("UPDATE projects SET name = ?, default_aspect_ratio = ? WHERE id = ?",
+                        name.value.strip(), aspect_ratio.value, project["id"])
+                ui.navigate.reload()
+
+        name.on("keydown.enter", save, js_handler=ENTER_WITHOUT_IME)
+        with ui.row().classes("w-full justify-end"):
+            ui.button("取消", on_click=dialog.close).props("flat color=grey-8")
+            ui.button("保存", on_click=save).props("unelevated")
+    dialog.open()
+
+
+def title_row(name: str, on_edit, private: bool = False) -> None:
     with ui.row().classes("w-full items-center no-wrap gap-1"):
         ui.label(name).classes("text-2xl font-semibold truncate")
-        if on_make_public:
+        if private:
             ui.icon("lock", color="grey-6").tooltip("私有项目")
-        ui.button(icon="edit", on_click=lambda: rename_dialog(name, on_rename, on_make_public)).props("flat round dense color=grey-6")
+        ui.button(icon="edit", on_click=on_edit).props("flat round dense color=grey-6")
 
 
 def section_label(text: str) -> None:
@@ -245,9 +266,7 @@ def project_page(project_id: int):
         episode_list.refresh()
 
     with ui.column().classes(CONTAINER):
-        title_row(project["name"], lambda name: execute("UPDATE projects SET name = ? WHERE id = ?", name, project_id),
-                  on_make_public=None if project["owner"] is None else (
-                      lambda: execute("UPDATE projects SET owner = NULL WHERE id = ?", project_id)))
+        title_row(project["name"], lambda: project_dialog(project), private=project["owner"] is not None)
         section_label("剧集")
         add_row("剧集名称，例如：第 1 集", add)
         episode_list()
@@ -308,12 +327,14 @@ def episode_page(episode_id: int):
     def add():
         position, number = get("SELECT COALESCE(MAX(position), 0) + 1, COUNT(*) + 1 FROM scenes WHERE episode_id = ?",
                                episode_id)
-        scene_id = execute("INSERT INTO scenes (episode_id, name, position) VALUES (?, ?, ?)",
-                           episode_id, f"场景 {number}", position)
+        scene_id = execute("INSERT INTO scenes (episode_id, name, position, aspect_ratio) "
+                           "SELECT ?, ?, ?, p.default_aspect_ratio FROM episodes e JOIN projects p ON p.id = e.project_id "
+                           "WHERE e.id = ?", episode_id, f"场景 {number}", position, episode_id)
         ui.navigate.to(f"/scene/{scene_id}")
 
     with ui.column().classes(CONTAINER):
-        title_row(episode["name"], lambda name: execute("UPDATE episodes SET name = ? WHERE id = ?", name, episode_id))
+        title_row(episode["name"], lambda: rename_dialog(episode["name"], lambda name: execute(
+            "UPDATE episodes SET name = ? WHERE id = ?", name, episode_id)))
         section_label("场景")
         scene_list()
         ui.button("添加场景", icon="add", on_click=add).props("outline").classes("w-full h-12 rounded-xl")
@@ -373,10 +394,12 @@ def candidate_gallery(scene_id: int, on_count):
 
 
 def scene_editor(scene) -> None:
-    saved = {column: scene[column] for column in PROMPT_LABELS}
+    columns = (*PROMPT_LABELS, "aspect_ratio")
+    locked_columns = ("image_positive", "image_negative", "aspect_ratio")
+    saved = {column: scene[column] for column in columns}
     fields = {}
     save_buttons = []
-    image_columns = ("image_positive", "image_negative")
+    locked = candidate_count(scene["id"]) > 0
 
     def set_unsaved(unsaved: bool) -> None:
         if unsaved != save_buttons[0].enabled:
@@ -385,20 +408,20 @@ def scene_editor(scene) -> None:
             ui.run_javascript(f"window.unsavedPrompts = {str(unsaved).lower()}")
 
     def on_edit() -> None:
-        set_unsaved(any(fields[c].value != saved[c] for c in PROMPT_LABELS))
+        set_unsaved(any(fields[c].value != saved[c] for c in columns))
 
     def unlock_when_empty(count: int) -> None:
         if count == 0:
             lock_notice.set_visibility(False)
-            for column in image_columns:
+            for column in locked_columns:
                 fields[column].props(remove="readonly")
 
     def copy_scene() -> None:
         execute("UPDATE scenes SET position = position + 1 WHERE episode_id = ? AND position > ?",
                 scene["episode_id"], scene["position"])
-        scene_id = execute("INSERT INTO scenes (episode_id, name, position, image_positive, image_negative, video_prompt) "
-                           "SELECT episode_id, name || ' 副本', position + 1, image_positive, image_negative, video_prompt "
-                           "FROM scenes WHERE id = ?", scene["id"])
+        scene_id = execute("INSERT INTO scenes (episode_id, name, position, image_positive, image_negative, video_prompt, "
+                           "aspect_ratio) SELECT episode_id, name || ' 副本', position + 1, image_positive, image_negative, "
+                           "video_prompt, aspect_ratio FROM scenes WHERE id = ?", scene["id"])
         ui.navigate.to(f"/scene/{scene_id}")
 
     def delete_candidates() -> None:
@@ -406,11 +429,12 @@ def scene_editor(scene) -> None:
         refresh_gallery()
 
     def save() -> None:
-        if any(fields[c].value != saved[c] for c in image_columns) and candidate_count(scene["id"]):
-            ui.notify("已有候选图，图像提示词无法保存。可先复制文字，刷新后用“复制场景”新建场景再粘贴。", type="warning")
+        if any(fields[c].value != saved[c] for c in locked_columns) and candidate_count(scene["id"]):
+            ui.notify("已有候选图，图像提示词和画幅比例无法保存。可先复制文字，刷新后用“复制场景”新建场景再粘贴。",
+                      type="warning")
             return
-        saved.update({c: fields[c].value for c in PROMPT_LABELS})
-        execute("UPDATE scenes SET image_positive = ?, image_negative = ?, video_prompt = ? WHERE id = ?",
+        saved.update({c: fields[c].value for c in columns})
+        execute("UPDATE scenes SET image_positive = ?, image_negative = ?, video_prompt = ?, aspect_ratio = ? WHERE id = ?",
                 *saved.values(), scene["id"])
         set_unsaved(False)
         ui.notify("已保存", type="positive")
@@ -424,11 +448,18 @@ def scene_editor(scene) -> None:
                                         .classes("px-3 rounded-lg"))
                     save_buttons[-1].disable()
             fields[column] = ui.textarea(value=scene[column], on_change=on_edit).classes("w-full").props("outlined autogrow")
-            if locked and column in image_columns:
+            if locked and column in locked_columns:
                 fields[column].props("readonly")
 
     ui.add_body_html("<script>window.addEventListener('beforeunload', "
                      "e => { if (window.unsavedPrompts) e.preventDefault() })</script>")
+
+    with ui.row().classes("w-full items-center justify-between no-wrap mt-3"):
+        ui.label("画幅比例").classes("text-xs font-medium text-zinc-500")
+        fields["aspect_ratio"] = ui.select(ASPECT_RATIOS, value=scene["aspect_ratio"], on_change=on_edit
+                                           ).classes("w-28").props("outlined dense options-dense")
+        if locked:
+            fields["aspect_ratio"].props("readonly")
 
     with ui.tabs().props("dense no-caps inline-label align=justify active-bg-color=white indicator-color=transparent"
                          ).classes("segmented w-full mt-3") as tabs:
@@ -437,19 +468,18 @@ def scene_editor(scene) -> None:
     with ui.tab_panels(tabs, value=image_tab).props("transition-prev=fade transition-next=fade transition-duration=150"
                                                    ).classes("scene-panels w-full bg-transparent"):
         with ui.tab_panel(image_tab).classes("p-0 gap-1"):
-            locked = candidate_count(scene["id"]) > 0
             with ui.column().classes("w-full gap-1 mt-3 px-3 pt-2 pb-1 rounded-lg bg-amber-50 text-amber-900 text-xs"
                                      ) as lock_notice:
                 with ui.row().classes("w-full items-center no-wrap gap-2"):
                     ui.icon("lock", size="16px")
-                    ui.label("已有候选图，图像提示词不可编辑。如需修改，请删除全部候选图，或复制场景。")
+                    ui.label("已有候选图，图像提示词和画幅比例不可编辑。如需修改，请删除全部候选图，或复制场景。")
                 with ui.row().classes("w-full justify-end gap-1"):
                     ui.button("删除全部候选图", icon="delete_sweep", on_click=lambda: confirm_delete(
                         "全部候选图", delete_candidates)).props("flat dense no-caps color=amber-10")
                     ui.button("复制场景", icon="content_copy", on_click=copy_scene
                               ).props("flat dense no-caps color=amber-10")
             lock_notice.set_visibility(locked)
-            prompt_fields(*image_columns)
+            prompt_fields("image_positive", "image_negative")
             refresh_gallery = candidate_gallery(scene["id"], unlock_when_empty)
         with ui.tab_panel(video_tab).classes("p-0 gap-1"):
             prompt_fields("video_prompt")
@@ -470,7 +500,8 @@ def scene_page(scene_id: int):
     with ui.column().classes(CONTAINER + " gap-1"):
         ui.button("返回场景列表", icon="arrow_back", on_click=lambda: ui.navigate.to(episode_url)
                   ).props("flat dense color=grey-8 no-caps").classes("-ml-2")
-        title_row(scene["name"], lambda name: execute("UPDATE scenes SET name = ? WHERE id = ?", name, scene_id))
+        title_row(scene["name"], lambda: rename_dialog(scene["name"], lambda name: execute(
+            "UPDATE scenes SET name = ? WHERE id = ?", name, scene_id)))
         scene_editor(scene)
         ui.button("删除场景", icon="delete_outline", on_click=lambda: confirm_delete(scene["name"], delete)
                   ).props("flat dense color=grey-7 no-caps").classes("self-end mt-4")

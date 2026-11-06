@@ -22,7 +22,7 @@ async def list_scenes(request: Request):
 
 @app.get("/api/scenes/{scene_id}")
 async def get_scene(scene_id: int, request: Request):
-    scene = visible_scene(scene_id, request.state.owner, "s.image_positive, s.image_negative, s.video_prompt")
+    scene = visible_scene(scene_id, request.state.owner, "s.image_positive, s.image_negative, s.video_prompt, s.aspect_ratio")
     if not scene:
         raise HTTPException(404, "scene not found")
     return dict(scene)

@@ -11,7 +11,8 @@ conn.executescript("""
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
-    owner TEXT  -- set only on private projects
+    owner TEXT,  -- set only on private projects
+    default_aspect_ratio TEXT NOT NULL DEFAULT '16:9'
 );
 CREATE TABLE IF NOT EXISTS episodes (
     id INTEGER PRIMARY KEY,
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS scenes (
     image_positive TEXT NOT NULL DEFAULT '',
     image_negative TEXT NOT NULL DEFAULT '',
     video_prompt TEXT NOT NULL DEFAULT '',
+    aspect_ratio TEXT NOT NULL DEFAULT '16:9',
     position INTEGER NOT NULL DEFAULT 0,
     selected_image_id INTEGER REFERENCES images(id) ON DELETE SET NULL
 );
@@ -42,11 +44,17 @@ project_columns = [c["name"] for c in conn.execute("PRAGMA table_info(projects)"
 if "owner" not in project_columns:
     with conn:
         conn.execute("ALTER TABLE projects ADD COLUMN owner TEXT")
+if "default_aspect_ratio" not in project_columns:
+    with conn:
+        conn.execute("ALTER TABLE projects ADD COLUMN default_aspect_ratio TEXT NOT NULL DEFAULT '16:9'")
 scene_columns = [c["name"] for c in conn.execute("PRAGMA table_info(scenes)")]
 if "position" not in scene_columns:
     with conn:
         conn.execute("ALTER TABLE scenes ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
         conn.execute("UPDATE scenes SET position = id")
+if "aspect_ratio" not in scene_columns:
+    with conn:
+        conn.execute("ALTER TABLE scenes ADD COLUMN aspect_ratio TEXT NOT NULL DEFAULT '16:9'")
 if "selected_image_id" not in scene_columns:
     with conn:
         conn.execute("ALTER TABLE scenes ADD COLUMN selected_image_id INTEGER REFERENCES images(id) ON DELETE SET NULL")

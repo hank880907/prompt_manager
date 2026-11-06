@@ -28,8 +28,8 @@ def parse_scene_id(label: str) -> int | None:
 
 class LoadScenePrompt:
     CATEGORY = "prompt_manager"
-    RETURN_TYPES = ("STRING", "STRING", "INT")
-    RETURN_NAMES = ("positive", "negative", "scene_id")
+    RETURN_TYPES = ("STRING", "STRING", "INT", "STRING")
+    RETURN_NAMES = ("positive", "negative", "scene_id", "aspect_ratio")
     FUNCTION = "load"
 
     @classmethod
@@ -51,7 +51,7 @@ class LoadScenePrompt:
     def load(self, scene):
         scene_id = parse_scene_id(scene)
         prompts = request(f"/api/scenes/{scene_id}")
-        return prompts["image_positive"], prompts["image_negative"], scene_id
+        return prompts["image_positive"], prompts["image_negative"], scene_id, prompts["aspect_ratio"]
 
 
 class SaveSceneImage:
