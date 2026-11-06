@@ -6,8 +6,11 @@ from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
 from prompt_manager.auth import add_user, delete_user, is_admin, owner_of, safe_redirect, verify_user
-from prompt_manager.db import VIEWS, VISIBLE, execute, execute_many, get, query, visible_character, visible_scene
-from prompt_manager.images import image_size
+from prompt_manager.comfyui import VIEW_PROMPTS, queued_ids, submit
+from prompt_manager.config import CHARACTER_FRONT_WORKFLOW, CHARACTER_VIEW_WORKFLOW, SCENE_WORKFLOW
+from prompt_manager.db import (VIEWS, VISIBLE, character_label, execute, execute_many, get, query, scene_labels,
+                               selected_front, visible_character, visible_scene)
+from prompt_manager.images import image_size, save_png
 
 CONTAINER = "w-full max-w-3xl mx-auto px-4 py-6 gap-3"
 ENTER_WITHOUT_IME = "(e) => { if (!e.isComposing && e.keyCode !== 229) emit() }"
@@ -350,6 +353,10 @@ def candidate_count(scene_id: int) -> int:
     return get("SELECT COUNT(*) FROM images WHERE scene_id = ?", scene_id)[0]
 
 
+def scene_locked(scene_id: int) -> bool:
+    return candidate_count(scene_id) + get("SELECT COUNT(*) FROM jobs WHERE scene_id = ?", scene_id)[0] > 0
+
+
 def lock_notice(text: str, delete_name: str, on_delete, copy_label: str, on_copy) -> ui.column:
     with ui.column().classes("w-full gap-1 mt-3 px-3 pt-2 pb-1 rounded-lg bg-amber-50 text-amber-900 text-xs") as notice:
         with ui.row().classes("w-full items-center no-wrap gap-2"):
@@ -362,26 +369,50 @@ def lock_notice(text: str, delete_name: str, on_delete, copy_label: str, on_copy
     return notice
 
 
+async def start_job(workflow: str, inputs: dict[str, dict], **job) -> bool:
+    try:
+        prompt_id = await run.io_bound(submit, workflow, inputs)
+    except (OSError, RuntimeError) as error:
+        ui.notify(f"无法提交到 ComfyUI：{error}", type="negative", multi_line=True)
+        return False
+    execute(f"INSERT INTO jobs (prompt_id, {', '.join(job)}) VALUES (?{', ?' * len(job)})", prompt_id, *job.values())
+    return True
+
+
+async def sync_jobs() -> None:
+    """Drop jobs that ComfyUI has finished, or all of them if ComfyUI can't be reached."""
+    jobs = [row["prompt_id"] for row in query("SELECT prompt_id FROM jobs")]
+    if jobs:
+        queued = await run.io_bound(queued_ids) or set()
+        execute_many("DELETE FROM jobs WHERE prompt_id = ?", [(job,) for job in jobs if job not in queued])
+
+
 def candidate_gallery(event: str, title: str, empty_text: str, load, select, delete,
                       on_count=lambda count: None, selection_locked=lambda: False, fit: str = "cover",
-                      notice=lambda: None):
-    """load() returns rows with id, filename and selected; notice() renders under the title.
-    Needs VIEWER_HEAD on the page."""
-    shown = 0
+                      notice=lambda: None, pending=lambda: 0, on_generate=None):
+    """load() returns rows with id, filename and selected; notice() renders under the title;
+    pending() is the number of images still being generated. Needs VIEWER_HEAD on the page."""
+    shown = (0, 0)
 
     @ui.refreshable
     def gallery():
         nonlocal shown
         images = load()
-        shown = len(images)
-        on_count(shown)
-        section_label(f"{title}（{len(images)}）")
+        shown = (len(images), pending())
+        on_count(sum(shown))
+        with ui.row().classes("w-full items-end justify-between no-wrap"):
+            section_label(f"{title}（{len(images)}）")
+            if on_generate:
+                ui.button("生成", icon="auto_awesome", on_click=on_generate).props("flat dense no-caps")
         notice()
-        if not images:
+        if not any(shown):
             empty_state(empty_text)
             return
         ui.label("点击图片可放大查看、选用或删除").classes("text-xs text-zinc-400")
         with ui.element("div").classes("grid grid-cols-2 sm:grid-cols-3 gap-2 w-full"):
+            for _ in range(shown[1]):
+                with ui.element("div").classes("aspect-square rounded-lg bg-zinc-200 flex items-center justify-center"):
+                    ui.spinner(size="lg", color="grey-6")
             for i, img in enumerate(images):
                 with ui.element("div").classes("relative cursor-pointer").on(
                         "click", lambda i=i: open_viewer(list(images), i)):
@@ -413,7 +444,7 @@ def candidate_gallery(event: str, title: str, empty_text: str, load, select, del
     ui.on(f"{event}_delete", lambda e: confirm_delete("这张候选图", lambda: on_delete(e.args)))
     ui.on(f"{event}_closed", gallery.refresh)
     gallery()
-    ui.timer(5, lambda: len(load()) != shown and gallery.refresh())
+    ui.timer(5, lambda: (len(load()), pending()) != shown and gallery.refresh())
     return gallery.refresh
 
 
@@ -423,7 +454,7 @@ def scene_editor(scene) -> None:
     saved = {column: scene[column] for column in columns}
     fields = {}
     save_buttons = []
-    locked = candidate_count(scene["id"]) > 0
+    locked = scene_locked(scene["id"])
 
     def set_unsaved(unsaved: bool) -> None:
         if unsaved != save_buttons[0].enabled:
@@ -434,11 +465,25 @@ def scene_editor(scene) -> None:
     def on_edit() -> None:
         set_unsaved(any(fields[c].value != saved[c] for c in columns))
 
+    def set_locked(value: bool) -> None:
+        notice.set_visibility(value)
+        for column in locked_columns:
+            if value:
+                fields[column].props("readonly")
+            else:
+                fields[column].props(remove="readonly")
+
     def unlock_when_empty(count: int) -> None:
         if count == 0:
-            notice.set_visibility(False)
-            for column in locked_columns:
-                fields[column].props(remove="readonly")
+            set_locked(False)
+
+    async def generate() -> None:
+        if save_buttons[0].enabled:
+            save()
+        label = next(s["label"] for s in scene_labels(current_owner()) if s["id"] == scene["id"])
+        if await start_job(SCENE_WORKFLOW, {"PromptManagerLoadScene": {"scene": label}}, scene_id=scene["id"]):
+            set_locked(True)
+            refresh_gallery()
 
     def copy_scene() -> None:
         execute("UPDATE scenes SET position = position + 1 WHERE episode_id = ? AND position > ?",
@@ -453,8 +498,8 @@ def scene_editor(scene) -> None:
         refresh_gallery()
 
     def save() -> None:
-        if any(fields[c].value != saved[c] for c in locked_columns) and candidate_count(scene["id"]):
-            ui.notify("已有候选图，图像提示词和画幅比例无法保存。可先复制文字，刷新后用“复制场景”新建场景再粘贴。",
+        if any(fields[c].value != saved[c] for c in locked_columns) and scene_locked(scene["id"]):
+            ui.notify("已有或正在生成候选图，图像提示词和画幅比例无法保存。可先复制文字，刷新后用“复制场景”新建场景再粘贴。",
                       type="warning")
             return
         saved.update({c: fields[c].value for c in columns})
@@ -491,17 +536,22 @@ def scene_editor(scene) -> None:
     with ui.tab_panels(tabs, value=image_tab).props("transition-prev=fade transition-next=fade transition-duration=150"
                                                    ).classes("scene-panels w-full bg-transparent"):
         with ui.tab_panel(image_tab).classes("p-0 gap-1"):
-            notice = lock_notice("已有候选图，图像提示词和画幅比例不可编辑。如需修改，请删除全部候选图，或复制场景。",
+            notice = lock_notice("已有或正在生成候选图，图像提示词和画幅比例不可编辑。如需修改，请删除全部候选图，或复制场景。",
                                  "全部候选图", delete_candidates, "复制场景", copy_scene)
             notice.set_visibility(locked)
             prompt_fields("image_positive", "image_negative")
+            if SCENE_WORKFLOW:
+                ui.button("生成候选图", icon="auto_awesome", on_click=generate).props("unelevated no-caps").classes(
+                    "w-full mt-3 rounded-lg")
+            ui.timer(3, sync_jobs)
             refresh_gallery = candidate_gallery(
                 "scene", "候选图", "还没有候选图，在 ComfyUI 中用“保存候选图”节点生成",
                 lambda: query("SELECT i.id, i.filename, i.id = s.selected_image_id AS selected FROM images i "
                               "JOIN scenes s ON s.id = i.scene_id WHERE i.scene_id = ? ORDER BY i.id DESC", scene["id"]),
                 lambda image_id: execute("UPDATE scenes SET selected_image_id = ? WHERE id = ?", image_id, scene["id"]),
                 lambda image_id: execute("DELETE FROM images WHERE id = ?", image_id),
-                on_count=unlock_when_empty)
+                on_count=unlock_when_empty,
+                pending=lambda: get("SELECT COUNT(*) FROM jobs WHERE scene_id = ?", scene["id"])[0])
         with ui.tab_panel(video_tab).classes("p-0 gap-1"):
             prompt_fields("video_prompt")
 
@@ -590,11 +640,23 @@ def view_count(character_id: int, front: bool) -> int:
                character_id, front)[0]
 
 
+def pending_count(character_id: int, front: bool) -> int:
+    return get("SELECT COUNT(*) FROM jobs WHERE character_id = ? AND (view = 'front') = ?", character_id, front)[0]
+
+
+def prompts_locked(character_id: int) -> bool:
+    return view_count(character_id, front=True) + pending_count(character_id, front=True) > 0
+
+
+def front_selection_locked(character_id: int) -> bool:
+    return view_count(character_id, front=False) + pending_count(character_id, front=False) > 0
+
+
 def character_editor(character) -> None:
     character_id = character["id"]
     saved = {column: character[column] for column in CHARACTER_LABELS}
     fields = {}
-    locked = view_count(character_id, front=True) > 0
+    locked = prompts_locked(character_id)
 
     def on_edit() -> None:
         unsaved = any(fields[c].value != saved[c] for c in CHARACTER_LABELS)
@@ -603,46 +665,122 @@ def character_editor(character) -> None:
             ui.run_javascript(f"window.unsavedPrompts = {str(unsaved).lower()}")
 
     def save() -> None:
-        if view_count(character_id, front=True):
-            ui.notify("已有正面全身图，提示词无法保存。可先复制文字，刷新后用“复制角色”新建角色再粘贴。", type="warning")
+        if prompts_locked(character_id):
+            ui.notify("已有或正在生成正面全身图，提示词无法保存。可先复制文字，刷新后用“复制角色”新建角色再粘贴。", type="warning")
             return
         saved.update({c: fields[c].value for c in CHARACTER_LABELS})
         execute("UPDATE characters SET positive = ?, negative = ? WHERE id = ?", *saved.values(), character_id)
         on_edit()
         ui.notify("已保存", type="positive")
 
+    def set_locked(value: bool) -> None:
+        notice.set_visibility(value)
+        for field in fields.values():
+            if value:
+                field.props("readonly")
+            else:
+                field.props(remove="readonly")
+        references.refresh()
+
     def unlock_when_empty(count: int) -> None:
         if count == 0:
-            notice.set_visibility(False)
-            for field in fields.values():
-                field.props(remove="readonly")
+            set_locked(False)
+
+    async def generate(view: str) -> None:
+        if view == "front" and save_button.enabled:
+            save()
+        if view != "front" and not selected_front(character_id):
+            ui.notify("请先选用一张正面全身图", type="warning")
+            return
+        label = character_label(visible_character(character_id, current_owner(), "c.id, c.name, p.name AS project"))
+        inputs = {node: {"character": label} for node in (
+            "PromptManagerLoadCharacter", "PromptManagerLoadCharacterReference", "PromptManagerLoadCharacterUploads")}
+        inputs["PromptManagerSaveCharacterImage"] = {"view": VIEW_PROMPTS[view]}
+        if view != "front":
+            inputs["PromptManagerLoadCharacterReference"]["view"] = VIEW_PROMPTS[view]
+        workflow = CHARACTER_FRONT_WORKFLOW if view == "front" else CHARACTER_VIEW_WORKFLOW
+        if not await start_job(workflow, inputs, character_id=character_id, view=view):
+            return
+        if view == "front":
+            set_locked(True)
+        else:
+            refresh_views[view]()
+        refresh_front()
+
+    async def add_references(e) -> None:
+        uploader.reset()
+        if prompts_locked(character_id):
+            ui.notify("已有或正在生成正面全身图，参考图无法修改", type="warning")
+            return
+        for file in e.files:
+            filename = await run.io_bound(save_png, await file.read())
+            execute("INSERT INTO character_references (character_id, filename) VALUES (?, ?)", character_id, filename)
+        references.refresh()
+
+    def delete_reference(reference_id: int) -> None:
+        if prompts_locked(character_id):
+            ui.notify("已有或正在生成正面全身图，参考图无法修改", type="warning")
+            return
+        execute("DELETE FROM character_references WHERE id = ?", reference_id)
+        references.refresh()
+
+    @ui.refreshable
+    def references() -> None:
+        rows = query("SELECT id, filename FROM character_references WHERE character_id = ? ORDER BY id", character_id)
+        editable = not prompts_locked(character_id)
+        with ui.expansion(value=True).classes("w-full bg-white border border-zinc-200 rounded-xl mt-3") as expansion:
+            with expansion.add_slot("header"):
+                with ui.row().classes("w-full items-center no-wrap gap-3"):
+                    ui.label("参考图").classes("font-semibold")
+                    with ui.row().classes("no-wrap gap-0 -space-x-2"):
+                        for row in rows[:4]:
+                            ui.image(f"/thumbnails/{row['filename']}").classes("w-7 h-7 rounded-full ring-2 ring-white")
+                    ui.label(f"{len(rows)} 张").classes("text-xs text-zinc-400")
+            with ui.column().classes("w-full gap-3 pb-2"):
+                if editable:
+                    with ui.button(on_click=lambda: uploader.run_method("pickFiles")).props("flat no-caps").classes(
+                            "w-full py-4 border-2 border-dashed border-zinc-300 rounded-lg text-zinc-400"):
+                        ui.icon("add_photo_alternate")
+                        ui.label("点击上传图片（可多选）").classes("ml-2")
+                elif not rows:
+                    ui.label("没有参考图").classes("text-sm text-zinc-400")
+                with ui.element("div").classes("grid grid-cols-4 sm:grid-cols-6 gap-2 w-full"):
+                    for row in rows:
+                        with ui.element("div").classes("relative"):
+                            ui.image(f"/thumbnails/{row['filename']}").classes("aspect-square rounded-lg bg-zinc-200")
+                            if editable:
+                                ui.button(icon="close", on_click=lambda r=row["id"]: confirm_delete(
+                                    "这张参考图", lambda: delete_reference(r))).props(
+                                    "round dense size=xs color=black").classes("absolute top-1 right-1 opacity-60")
 
     def delete_front() -> None:
-        if view_count(character_id, front=False):
-            ui.notify("已有其他视角的图片，请先删除它们", type="warning")
+        if front_selection_locked(character_id):
+            ui.notify("已有或正在生成其他视角的图片，请先删除它们", type="warning")
             return
         execute("DELETE FROM character_images WHERE character_id = ? AND view = 'front'", character_id)
         refresh_front()
 
     def delete_views() -> None:
         execute("DELETE FROM character_images WHERE character_id = ? AND view != 'front'", character_id)
-        for refresh in refresh_views:
+        for refresh in refresh_views.values():
             refresh()
 
     def front_notice() -> None:
         nonlocal front_locked
-        front_locked = view_count(character_id, front=False) > 0
+        front_locked = front_selection_locked(character_id)
         if front_locked:
-            lock_notice("已有多视角图片，正面全身图的选用已锁定。如需更换，请删除全部多视角图片，或复制角色。",
+            lock_notice("已有或正在生成多视角图片，正面全身图的选用已锁定。如需更换，请删除全部多视角图片，或复制角色。",
                         "全部多视角图片", delete_views, "复制角色", copy_character)
 
     def on_view_count(count: int) -> None:
-        if (view_count(character_id, front=False) > 0) != front_locked:
+        if front_selection_locked(character_id) != front_locked:
             refresh_front()
 
     def copy_character() -> None:
         copy_id = execute("INSERT INTO characters (project_id, name, positive, negative) "
                           "SELECT project_id, name || ' 副本', positive, negative FROM characters WHERE id = ?", character_id)
+        execute("INSERT INTO character_references (character_id, filename) "
+                "SELECT ?, filename FROM character_references WHERE character_id = ?", copy_id, character_id)
         ui.navigate.to(f"/character/{copy_id}")
 
     def view_gallery(view: str, **options):
@@ -653,12 +791,16 @@ def character_editor(character) -> None:
             lambda image_id: execute("UPDATE character_images SET selected = (id IS ?) WHERE character_id = ? AND view = ?",
                                      image_id, character_id, view),
             lambda image_id: execute("DELETE FROM character_images WHERE id = ?", image_id),
+            pending=lambda: get("SELECT COUNT(*) FROM jobs WHERE character_id = ? AND view = ?", character_id, view)[0],
             fit="contain", **options)
 
     ui.add_body_html(UNSAVED_GUARD)
-    notice = lock_notice("已有正面全身图，提示词不可编辑。如需修改，请删除全部正面全身图，或复制角色。",
+    notice = lock_notice("已有或正在生成正面全身图，参考图和提示词不可编辑。如需修改，请删除全部正面全身图，或复制角色。",
                          "全部正面全身图", delete_front, "复制角色", copy_character)
     notice.set_visibility(locked)
+    uploader = ui.upload(multiple=True, auto_upload=True, on_multi_upload=add_references
+                         ).props("accept=image/*").classes("hidden")
+    references()
     for i, (column, label) in enumerate(CHARACTER_LABELS.items()):
         with ui.row().classes("w-full items-end justify-between no-wrap mt-2"):
             ui.label(label).classes("text-xs font-medium text-zinc-500")
@@ -668,13 +810,19 @@ def character_editor(character) -> None:
         fields[column] = ui.textarea(value=character[column], on_change=on_edit).classes("w-full").props("outlined autogrow")
         if locked:
             fields[column].props("readonly")
+    if CHARACTER_FRONT_WORKFLOW:
+        ui.button("生成正面全身图", icon="auto_awesome", on_click=lambda: generate("front")).props(
+            "unelevated no-caps").classes("w-full mt-3 rounded-lg")
+    ui.timer(3, sync_jobs)
     front_locked = False
     refresh_front = view_gallery("front", on_count=unlock_when_empty, notice=front_notice,
-                                 selection_locked=lambda: view_count(character_id, front=False) > 0)
+                                 selection_locked=lambda: front_selection_locked(character_id))
     ui.label("多视角").classes("text-lg font-semibold mt-6")
     ui.label("选用一张正面全身图后，在 ComfyUI 中用“加载角色参考图”生成以下视角。生成后正面全身图的选用会被锁定。"
              ).classes("text-xs text-zinc-400")
-    refresh_views = [view_gallery(view, on_count=on_view_count) for view in list(VIEWS)[1:]]
+    refresh_views = {view: view_gallery(view, on_count=on_view_count,
+                                        on_generate=(lambda v=view: generate(v)) if CHARACTER_VIEW_WORKFLOW else None)
+                     for view in list(VIEWS)[1:]}
 
 
 @ui.page("/character/{character_id}")

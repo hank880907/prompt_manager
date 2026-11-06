@@ -135,6 +135,11 @@ class LoadCharacterPrompt:
         return prompts["positive"], prompts["negative"], character_id
 
 
+def load_image(path: str):
+    with Image.open(io.BytesIO(fetch(path))) as image:
+        return torch.from_numpy(np.array(image.convert("RGB")).astype(np.float32) / 255)[None]
+
+
 class LoadCharacterReference(LoadCharacterPrompt):
     RETURN_TYPES = ("IMAGE", "STRING", "STRING", "STRING", "INT", list(VIEWS.values()))
     RETURN_NAMES = ("image", "positive", "negative", "view_prompt", "character_id", "view")
@@ -145,9 +150,20 @@ class LoadCharacterReference(LoadCharacterPrompt):
 
     def load(self, character, view):
         positive, negative, character_id = super().load(character)
-        with Image.open(io.BytesIO(fetch(f"/api/characters/{character_id}/reference"))) as image:
-            pixels = np.array(image.convert("RGB")).astype(np.float32) / 255
-        return torch.from_numpy(pixels)[None], positive, negative, view, character_id, view
+        return load_image(f"/api/characters/{character_id}/reference"), positive, negative, view, character_id, view
+
+
+class LoadCharacterUploads(LoadCharacterPrompt):
+    RETURN_TYPES = ("IMAGE", "INT")
+    RETURN_NAMES = ("images", "character_id")
+    OUTPUT_IS_LIST = (True, False)
+
+    def load(self, character):
+        character_id = parse_id(character)
+        ids = request(f"/api/characters/{character_id}")["references"]
+        if not ids:
+            raise ValueError("该角色没有上传参考图")
+        return [load_image(f"/api/characters/{character_id}/references/{i}") for i in ids], character_id
 
 
 class SaveCharacterImage:
@@ -171,6 +187,7 @@ NODE_CLASS_MAPPINGS = {
     "PromptManagerSaveImage": SaveSceneImage,
     "PromptManagerLoadCharacter": LoadCharacterPrompt,
     "PromptManagerLoadCharacterReference": LoadCharacterReference,
+    "PromptManagerLoadCharacterUploads": LoadCharacterUploads,
     "PromptManagerSaveCharacterImage": SaveCharacterImage,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -178,5 +195,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptManagerSaveImage": "保存候选图",
     "PromptManagerLoadCharacter": "加载角色提示词",
     "PromptManagerLoadCharacterReference": "加载角色参考图",
+    "PromptManagerLoadCharacterUploads": "加载角色上传参考图",
     "PromptManagerSaveCharacterImage": "保存角色图",
 }

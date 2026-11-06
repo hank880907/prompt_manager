@@ -5,20 +5,13 @@ from fastapi.responses import FileResponse
 from nicegui import app, run
 
 from prompt_manager.config import IMAGES_DIR
-from prompt_manager.db import VIEWS, VISIBLE, execute, query, selected_front, visible_character, visible_scene
+from prompt_manager.db import (VIEWS, VISIBLE, character_label, execute, get, query, scene_labels, selected_front,
+                              visible_character, visible_scene)
 
 
 @app.get("/api/scenes")
 async def list_scenes(request: Request):
-    owner = request.state.owner
-    rows = query(f"""
-        SELECT s.id, p.name AS project, e.name AS episode, s.name,
-               ROW_NUMBER() OVER (PARTITION BY s.episode_id ORDER BY s.position) AS n
-        FROM scenes s JOIN episodes e ON e.id = s.episode_id JOIN projects p ON p.id = e.project_id
-        WHERE {VISIBLE} ORDER BY p.id, e.id, s.position
-    """, owner, owner)
-    return [{"id": r["id"], "label": f"{r['project']} / {r['episode']} / {r['n']}. {r['name']} #{r['id']}"}
-            for r in rows]
+    return scene_labels(request.state.owner)
 
 
 @app.get("/api/scenes/{scene_id}")
@@ -49,7 +42,7 @@ async def list_characters(request: Request):
     owner = request.state.owner
     rows = query(f"SELECT c.id, p.name AS project, c.name FROM characters c JOIN projects p ON p.id = c.project_id "
                  f"WHERE {VISIBLE} ORDER BY p.id, c.id", owner, owner)
-    return [{"id": r["id"], "label": f"{r['project']} / {r['name']} #{r['id']}"} for r in rows]
+    return [{"id": r["id"], "label": character_label(r)} for r in rows]
 
 
 @app.get("/api/characters/{character_id}")
@@ -58,7 +51,8 @@ async def get_character(character_id: int, request: Request):
     if not character:
         raise HTTPException(404, "character not found")
     front = selected_front(character_id)
-    return {**dict(character), "reference": front and front["filename"]}
+    references = query("SELECT id FROM character_references WHERE character_id = ? ORDER BY id", character_id)
+    return {**dict(character), "reference": front and front["filename"], "references": [r["id"] for r in references]}
 
 
 @app.get("/api/characters/{character_id}/reference")
@@ -67,6 +61,15 @@ async def get_reference(character_id: int, request: Request):
     if not front:
         raise HTTPException(404, "no front image selected")
     return FileResponse(IMAGES_DIR / front["filename"], media_type="image/png")
+
+
+@app.get("/api/characters/{character_id}/references/{reference_id}")
+async def get_uploaded_reference(character_id: int, reference_id: int, request: Request):
+    reference = visible_character(character_id, request.state.owner) and get(
+        "SELECT filename FROM character_references WHERE id = ? AND character_id = ?", reference_id, character_id)
+    if not reference:
+        raise HTTPException(404, "reference not found")
+    return FileResponse(IMAGES_DIR / reference["filename"], media_type="image/png")
 
 
 @app.post("/api/characters/{character_id}/images")

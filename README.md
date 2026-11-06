@@ -20,6 +20,9 @@ Put HTTPS in front of it (e.g. Caddy) before exposing it publicly; otherwise pas
    - **保存候选图**: connect `images` and `scene_id`; images appear on the scene page.
    - **加载角色提示词**: pick a character, outputs `positive`, `negative`, `character_id`. Use with 保存角色图 set to `full body, front view`.
    - **加载角色参考图**: pick a character and a view, outputs the selected front image, `positive`, `negative`, `view_prompt`, `character_id`, `view`.
+   - **加载角色上传参考图**: pick a character, outputs the images uploaded on the character page as a list (images may differ in size), and `character_id`.
    - **保存角色图**: connect `images`, `character_id`, and `view` (pick it or connect it from 加载角色参考图).
+
+To generate from the app, set `COMFYUI_URL` and `CHARACTER_FRONT_WORKFLOW` in `.env` (see `.env.example`). The workflow is a ComfyUI "Export (API)" file that uses 加载角色提示词 and ends with 保存角色图; the app fills in the character and randomizes every `seed` / `noise_seed` input on each run.
 
 The scene list in the dropdown refreshes when ComfyUI reloads node definitions (press `R` or reload the page).

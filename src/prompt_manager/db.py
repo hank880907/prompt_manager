@@ -44,6 +44,17 @@ CREATE TABLE IF NOT EXISTS character_images (
     filename TEXT NOT NULL,
     selected INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS character_references (
+    id INTEGER PRIMARY KEY,
+    character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    filename TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS jobs (
+    prompt_id TEXT PRIMARY KEY,
+    scene_id INTEGER REFERENCES scenes(id) ON DELETE CASCADE,
+    character_id INTEGER REFERENCES characters(id) ON DELETE CASCADE,
+    view TEXT
+);
 CREATE TABLE IF NOT EXISTS users (
     username TEXT PRIMARY KEY,
     password_hash TEXT NOT NULL
@@ -110,6 +121,20 @@ def visible_scene(scene_id: int, owner: str | None, columns: str = "s.id") -> sq
 def visible_character(character_id: int, owner: str | None, columns: str = "c.id") -> sqlite3.Row | None:
     return get(f"SELECT {columns} FROM characters c JOIN projects p ON p.id = c.project_id "
                f"WHERE c.id = ? AND {VISIBLE}", character_id, owner, owner)
+
+
+def scene_labels(owner: str | None) -> list[dict]:
+    rows = query(f"""
+        SELECT s.id, p.name AS project, e.name AS episode, s.name,
+               ROW_NUMBER() OVER (PARTITION BY s.episode_id ORDER BY s.position) AS n
+        FROM scenes s JOIN episodes e ON e.id = s.episode_id JOIN projects p ON p.id = e.project_id
+        WHERE {VISIBLE} ORDER BY p.id, e.id, s.position
+    """, owner, owner)
+    return [{"id": r["id"], "label": f"{r['project']} / {r['episode']} / {r['n']}. {r['name']} #{r['id']}"} for r in rows]
+
+
+def character_label(row) -> str:
+    return f"{row['project']} / {row['name']} #{row['id']}"
 
 
 def selected_front(character_id: int) -> sqlite3.Row | None:

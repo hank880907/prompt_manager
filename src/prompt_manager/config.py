@@ -16,4 +16,8 @@ os.environ.setdefault("NICEGUI_STORAGE_PATH", str(DATA_DIR / ".nicegui"))
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
+CHARACTER_FRONT_WORKFLOW = os.environ.get("CHARACTER_FRONT_WORKFLOW", "")
+CHARACTER_VIEW_WORKFLOW = os.environ.get("CHARACTER_VIEW_WORKFLOW", "")
+SCENE_WORKFLOW = os.environ.get("SCENE_WORKFLOW", "")
 TRUSTED_NETWORKS = [ipaddress.ip_network(n.strip()) for n in os.environ.get("TRUSTED_IPS", "").split(",") if n.strip()]
