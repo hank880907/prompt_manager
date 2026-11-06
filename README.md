@@ -16,7 +16,7 @@ Put HTTPS in front of it (e.g. Caddy) before exposing it publicly; otherwise pas
    If ComfyUI's IP is not in `TRUSTED_IPS` (see `.env.example`), also set
    `PROMPT_MANAGER_USER=<name> PROMPT_MANAGER_PASSWORD=<password>`.
 3. Nodes (category `prompt_manager`):
-   - **加载场景提示词**: pick a scene, outputs `positive`, `negative`, `scene_id`, `aspect_ratio` (e.g. `16:9`).
+   - **加载场景提示词**: pick a scene, outputs `positive`, `negative`, `scene_id`, `aspect_ratio` (connects to the Resolution Selector node).
    - **保存候选图**: connect `images` and `scene_id`; images appear on the scene page.
 
 The scene list in the dropdown refreshes when ComfyUI reloads node definitions (press `R` or reload the page).

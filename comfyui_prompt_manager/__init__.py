@@ -21,6 +21,19 @@ def request(path: str, png: bytes | None = None):
         return json.loads(r.read())
 
 
+# Labels match ComfyUI's Resolution Selector so the output can connect to its aspect_ratio input.
+ASPECT_RATIO_LABELS = {
+    "1:1": "1:1 (Square)",
+    "2:3": "2:3 (Portrait Photo)",
+    "3:2": "3:2 (Photo)",
+    "3:4": "3:4 (Portrait Standard)",
+    "4:3": "4:3 (Standard)",
+    "9:16": "9:16 (Portrait Widescreen)",
+    "16:9": "16:9 (Widescreen)",
+    "21:9": "21:9 (Ultrawide)",
+}
+
+
 def parse_scene_id(label: str) -> int | None:
     match = re.search(r"#(\d+)$", label)
     return int(match.group(1)) if match else None
@@ -28,7 +41,7 @@ def parse_scene_id(label: str) -> int | None:
 
 class LoadScenePrompt:
     CATEGORY = "prompt_manager"
-    RETURN_TYPES = ("STRING", "STRING", "INT", "STRING")
+    RETURN_TYPES = ("STRING", "STRING", "INT", list(ASPECT_RATIO_LABELS.values()))
     RETURN_NAMES = ("positive", "negative", "scene_id", "aspect_ratio")
     FUNCTION = "load"
 
@@ -51,7 +64,7 @@ class LoadScenePrompt:
     def load(self, scene):
         scene_id = parse_scene_id(scene)
         prompts = request(f"/api/scenes/{scene_id}")
-        return prompts["image_positive"], prompts["image_negative"], scene_id, prompts["aspect_ratio"]
+        return prompts["image_positive"], prompts["image_negative"], scene_id, ASPECT_RATIO_LABELS[prompts["aspect_ratio"]]
 
 
 class SaveSceneImage:
