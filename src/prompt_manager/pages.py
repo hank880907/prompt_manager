@@ -6,13 +6,16 @@ from fastapi.responses import RedirectResponse
 from nicegui import app, run, ui
 
 from prompt_manager.auth import add_user, delete_user, is_admin, owner_of, safe_redirect, verify_user
-from prompt_manager.db import VISIBLE, execute, execute_many, get, query, visible_scene
+from prompt_manager.db import VIEWS, VISIBLE, execute, execute_many, get, query, visible_character, visible_scene
 from prompt_manager.images import image_size
 
 CONTAINER = "w-full max-w-3xl mx-auto px-4 py-6 gap-3"
 ENTER_WITHOUT_IME = "(e) => { if (!e.isComposing && e.keyCode !== 229) emit() }"
 ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9"]
 PROMPT_LABELS = {"image_positive": "图像提示词（正向）", "image_negative": "图像提示词（负向）", "video_prompt": "视频提示词"}
+CHARACTER_LABELS = {"positive": "正向提示词", "negative": "负向提示词"}
+VIEWER_HEAD = '<link rel="stylesheet" href="/static/photoswipe.css"><script type="module" src="/static/viewer.js"></script>'
+UNSAVED_GUARD = "<script>window.addEventListener('beforeunload', e => { if (window.unsavedPrompts) e.preventDefault() })</script>"
 
 CSS = """
 body { background: #f6f6f7; color: #18181b;
@@ -28,6 +31,7 @@ div.pswp .pswp__button--download, div.pswp .pswp__button--delete { display: flex
                 align-items: center; padding: 8px 18px; border: 0; border-radius: 999px; background: #fff;
                 color: #18181b; font-size: 14px; cursor: pointer; }
 .pswp__select.selected { background: #21ba45; color: #fff; }
+.pswp__select:disabled { cursor: default; }
 .pswp__select .material-icons { font-size: 18px; }
 .segmented { background: #e4e4e7; border-radius: 10px; padding: 2px; }
 .segmented .q-tab { border-radius: 8px; color: #71717a; min-height: 34px; }
@@ -267,6 +271,8 @@ def project_page(project_id: int):
 
     with ui.column().classes(CONTAINER):
         title_row(project["name"], lambda: project_dialog(project), private=project["owner"] is not None)
+        ui.button("角色管理", icon="groups", on_click=lambda: ui.navigate.to(f"/project/{project_id}/characters")
+                  ).props("outline no-caps").classes("w-full h-12 rounded-xl")
         section_label("剧集")
         add_row("剧集名称，例如：第 1 集", add)
         episode_list()
@@ -340,56 +346,74 @@ def episode_page(episode_id: int):
         ui.button("添加场景", icon="add", on_click=add).props("outline").classes("w-full h-12 rounded-xl")
 
 
-def selected_image_id(scene_id: int) -> int | None:
-    return get("SELECT selected_image_id FROM scenes WHERE id = ?", scene_id)[0]
-
-
 def candidate_count(scene_id: int) -> int:
     return get("SELECT COUNT(*) FROM images WHERE scene_id = ?", scene_id)[0]
 
 
-def candidate_gallery(scene_id: int, on_count):
+def lock_notice(text: str, delete_name: str, on_delete, copy_label: str, on_copy) -> ui.column:
+    with ui.column().classes("w-full gap-1 mt-3 px-3 pt-2 pb-1 rounded-lg bg-amber-50 text-amber-900 text-xs") as notice:
+        with ui.row().classes("w-full items-center no-wrap gap-2"):
+            ui.icon("lock", size="16px")
+            ui.label(text)
+        with ui.row().classes("w-full justify-end gap-1"):
+            ui.button(f"删除{delete_name}", icon="delete_sweep", on_click=lambda: confirm_delete(delete_name, on_delete)
+                      ).props("flat dense no-caps color=amber-10")
+            ui.button(copy_label, icon="content_copy", on_click=on_copy).props("flat dense no-caps color=amber-10")
+    return notice
+
+
+def candidate_gallery(event: str, title: str, empty_text: str, load, select, delete,
+                      on_count=lambda count: None, selection_locked=lambda: False, fit: str = "cover",
+                      notice=lambda: None):
+    """load() returns rows with id, filename and selected; notice() renders under the title.
+    Needs VIEWER_HEAD on the page."""
     shown = 0
 
     @ui.refreshable
     def gallery():
         nonlocal shown
-        images = query("SELECT * FROM images WHERE scene_id = ? ORDER BY id DESC", scene_id)
-        selected_id = selected_image_id(scene_id)
+        images = load()
         shown = len(images)
         on_count(shown)
-        section_label(f"候选图（{len(images)}）")
+        section_label(f"{title}（{len(images)}）")
+        notice()
         if not images:
-            empty_state("还没有候选图，在 ComfyUI 中用“保存候选图”节点生成")
+            empty_state(empty_text)
             return
         ui.label("点击图片可放大查看、选用或删除").classes("text-xs text-zinc-400")
         with ui.element("div").classes("grid grid-cols-2 sm:grid-cols-3 gap-2 w-full"):
             for i, img in enumerate(images):
-                selected = img["id"] == selected_id
                 with ui.element("div").classes("relative cursor-pointer").on(
                         "click", lambda i=i: open_viewer(list(images), i)):
-                    ui.image(f"/thumbnails/{img['filename']}").props("fit=cover").classes(
-                        "aspect-square rounded-lg bg-zinc-200" + (" ring-4 ring-zinc-900" if selected else ""))
-                    if selected:
+                    ui.image(f"/thumbnails/{img['filename']}").props(f"fit={fit}").classes(
+                        "aspect-square rounded-lg bg-zinc-200" + (" ring-4 ring-zinc-900" if img["selected"] else ""))
+                    if img["selected"]:
                         ui.badge("已选用", color="positive").classes("absolute top-2 left-2")
 
     def open_viewer(images: list, index: int) -> None:
         items = [{"id": img["id"], "filename": img["filename"], "src": f"/previews/{img['filename']}",
                   "msrc": f"/thumbnails/{img['filename']}", **dict(zip(("width", "height"), image_size(img["filename"])))}
                  for img in images]
-        ui.run_javascript(f"openViewer({json.dumps(items)}, {index}, {json.dumps(selected_image_id(scene_id))})")
+        selected_id = next((img["id"] for img in images if img["selected"]), None)
+        ui.run_javascript(f"openViewer({json.dumps(items)}, {index}, {json.dumps(selected_id)}, "
+                          f"{json.dumps(event)}, {json.dumps(selection_locked())})")
 
-    def delete(image_id: int) -> None:
-        execute("DELETE FROM images WHERE id = ?", image_id)
+    def on_select(image_id: int | None) -> None:
+        if not selection_locked():
+            select(image_id)
+
+    def on_delete(image_id: int) -> None:
+        if selection_locked() and any(img["id"] == image_id and img["selected"] for img in load()):
+            ui.notify("选用的图片已锁定，无法删除", type="warning")
+            return
+        delete(image_id)
         ui.run_javascript(f"viewerRemove({image_id})")
 
-    ui.add_head_html('<link rel="stylesheet" href="/static/photoswipe.css">'
-                     '<script type="module" src="/static/viewer.js"></script>')
-    ui.on("viewer_select", lambda e: execute("UPDATE scenes SET selected_image_id = ? WHERE id = ?", e.args, scene_id))
-    ui.on("viewer_delete", lambda e: confirm_delete("这张候选图", lambda: delete(e.args)))
-    ui.on("viewer_closed", gallery.refresh)
+    ui.on(f"{event}_select", lambda e: on_select(e.args))
+    ui.on(f"{event}_delete", lambda e: confirm_delete("这张候选图", lambda: on_delete(e.args)))
+    ui.on(f"{event}_closed", gallery.refresh)
     gallery()
-    ui.timer(5, lambda: candidate_count(scene_id) != shown and gallery.refresh())
+    ui.timer(5, lambda: len(load()) != shown and gallery.refresh())
     return gallery.refresh
 
 
@@ -412,7 +436,7 @@ def scene_editor(scene) -> None:
 
     def unlock_when_empty(count: int) -> None:
         if count == 0:
-            lock_notice.set_visibility(False)
+            notice.set_visibility(False)
             for column in locked_columns:
                 fields[column].props(remove="readonly")
 
@@ -451,8 +475,7 @@ def scene_editor(scene) -> None:
             if locked and column in locked_columns:
                 fields[column].props("readonly")
 
-    ui.add_body_html("<script>window.addEventListener('beforeunload', "
-                     "e => { if (window.unsavedPrompts) e.preventDefault() })</script>")
+    ui.add_body_html(UNSAVED_GUARD)
 
     with ui.row().classes("w-full items-center justify-between no-wrap mt-3"):
         ui.label("画幅比例").classes("text-xs font-medium text-zinc-500")
@@ -468,19 +491,17 @@ def scene_editor(scene) -> None:
     with ui.tab_panels(tabs, value=image_tab).props("transition-prev=fade transition-next=fade transition-duration=150"
                                                    ).classes("scene-panels w-full bg-transparent"):
         with ui.tab_panel(image_tab).classes("p-0 gap-1"):
-            with ui.column().classes("w-full gap-1 mt-3 px-3 pt-2 pb-1 rounded-lg bg-amber-50 text-amber-900 text-xs"
-                                     ) as lock_notice:
-                with ui.row().classes("w-full items-center no-wrap gap-2"):
-                    ui.icon("lock", size="16px")
-                    ui.label("已有候选图，图像提示词和画幅比例不可编辑。如需修改，请删除全部候选图，或复制场景。")
-                with ui.row().classes("w-full justify-end gap-1"):
-                    ui.button("删除全部候选图", icon="delete_sweep", on_click=lambda: confirm_delete(
-                        "全部候选图", delete_candidates)).props("flat dense no-caps color=amber-10")
-                    ui.button("复制场景", icon="content_copy", on_click=copy_scene
-                              ).props("flat dense no-caps color=amber-10")
-            lock_notice.set_visibility(locked)
+            notice = lock_notice("已有候选图，图像提示词和画幅比例不可编辑。如需修改，请删除全部候选图，或复制场景。",
+                                 "全部候选图", delete_candidates, "复制场景", copy_scene)
+            notice.set_visibility(locked)
             prompt_fields("image_positive", "image_negative")
-            refresh_gallery = candidate_gallery(scene["id"], unlock_when_empty)
+            refresh_gallery = candidate_gallery(
+                "scene", "候选图", "还没有候选图，在 ComfyUI 中用“保存候选图”节点生成",
+                lambda: query("SELECT i.id, i.filename, i.id = s.selected_image_id AS selected FROM images i "
+                              "JOIN scenes s ON s.id = i.scene_id WHERE i.scene_id = ? ORDER BY i.id DESC", scene["id"]),
+                lambda image_id: execute("UPDATE scenes SET selected_image_id = ? WHERE id = ?", image_id, scene["id"]),
+                lambda image_id: execute("DELETE FROM images WHERE id = ?", image_id),
+                on_count=unlock_when_empty)
         with ui.tab_panel(video_tab).classes("p-0 gap-1"):
             prompt_fields("video_prompt")
 
@@ -492,6 +513,7 @@ def scene_page(scene_id: int):
         return RedirectResponse("/")
     episode_url = f"/episode/{scene['episode_id']}"
     page_frame(*episode_crumbs(scene["episode_id"]))
+    ui.add_head_html(VIEWER_HEAD)
 
     def delete():
         execute("DELETE FROM scenes WHERE id = ?", scene_id)
@@ -504,6 +526,149 @@ def scene_page(scene_id: int):
             "UPDATE scenes SET name = ? WHERE id = ?", name, scene_id)))
         scene_editor(scene)
         ui.button("删除场景", icon="delete_outline", on_click=lambda: confirm_delete(scene["name"], delete)
+                  ).props("flat dense color=grey-7 no-caps").classes("self-end mt-4")
+
+
+@ui.page("/project/{project_id}/characters")
+def characters_page(project_id: int):
+    project = get(f"SELECT * FROM projects p WHERE id = ? AND {VISIBLE}", project_id, current_owner(), current_owner())
+    if not project:
+        return RedirectResponse("/")
+    page_frame((project["name"], f"/project/{project_id}"), ("角色", f"/project/{project_id}/characters"))
+
+    @ui.refreshable
+    def character_list():
+        characters = query("SELECT c.*, COUNT(i.id) AS n FROM characters c LEFT JOIN character_images i "
+                           "ON i.character_id = c.id WHERE c.project_id = ? GROUP BY c.id ORDER BY c.id", project_id)
+        if not characters:
+            empty_state("还没有角色")
+        for c in characters:
+            item_row(c["name"], f"#{c['id']} · {c['n']} 张图", f"/character/{c['id']}",
+                     lambda c=c: (execute("DELETE FROM characters WHERE id = ?", c["id"]), character_list.refresh()))
+
+    def add(name):
+        character_id = execute("INSERT INTO characters (project_id, name) VALUES (?, ?)", project_id, name)
+        ui.navigate.to(f"/character/{character_id}")
+
+    with ui.column().classes(CONTAINER):
+        ui.label("角色管理").classes("text-2xl font-semibold")
+        add_row("角色名称", add)
+        character_list()
+
+
+def view_count(character_id: int, front: bool) -> int:
+    return get("SELECT COUNT(*) FROM character_images WHERE character_id = ? AND (view = 'front') = ?",
+               character_id, front)[0]
+
+
+def character_editor(character) -> None:
+    character_id = character["id"]
+    saved = {column: character[column] for column in CHARACTER_LABELS}
+    fields = {}
+    locked = view_count(character_id, front=True) > 0
+
+    def on_edit() -> None:
+        unsaved = any(fields[c].value != saved[c] for c in CHARACTER_LABELS)
+        if unsaved != save_button.enabled:
+            save_button.set_enabled(unsaved)
+            ui.run_javascript(f"window.unsavedPrompts = {str(unsaved).lower()}")
+
+    def save() -> None:
+        if view_count(character_id, front=True):
+            ui.notify("已有正面全身图，提示词无法保存。可先复制文字，刷新后用“复制角色”新建角色再粘贴。", type="warning")
+            return
+        saved.update({c: fields[c].value for c in CHARACTER_LABELS})
+        execute("UPDATE characters SET positive = ?, negative = ? WHERE id = ?", *saved.values(), character_id)
+        on_edit()
+        ui.notify("已保存", type="positive")
+
+    def unlock_when_empty(count: int) -> None:
+        if count == 0:
+            notice.set_visibility(False)
+            for field in fields.values():
+                field.props(remove="readonly")
+
+    def delete_front() -> None:
+        if view_count(character_id, front=False):
+            ui.notify("已有其他视角的图片，请先删除它们", type="warning")
+            return
+        execute("DELETE FROM character_images WHERE character_id = ? AND view = 'front'", character_id)
+        refresh_front()
+
+    def delete_views() -> None:
+        execute("DELETE FROM character_images WHERE character_id = ? AND view != 'front'", character_id)
+        for refresh in refresh_views:
+            refresh()
+
+    def front_notice() -> None:
+        nonlocal front_locked
+        front_locked = view_count(character_id, front=False) > 0
+        if front_locked:
+            lock_notice("已有多视角图片，正面全身图的选用已锁定。如需更换，请删除全部多视角图片，或复制角色。",
+                        "全部多视角图片", delete_views, "复制角色", copy_character)
+
+    def on_view_count(count: int) -> None:
+        if (view_count(character_id, front=False) > 0) != front_locked:
+            refresh_front()
+
+    def copy_character() -> None:
+        copy_id = execute("INSERT INTO characters (project_id, name, positive, negative) "
+                          "SELECT project_id, name || ' 副本', positive, negative FROM characters WHERE id = ?", character_id)
+        ui.navigate.to(f"/character/{copy_id}")
+
+    def view_gallery(view: str, **options):
+        return candidate_gallery(
+            view, VIEWS[view], "还没有图片",
+            lambda: query("SELECT id, filename, selected FROM character_images "
+                          "WHERE character_id = ? AND view = ? ORDER BY id DESC", character_id, view),
+            lambda image_id: execute("UPDATE character_images SET selected = (id IS ?) WHERE character_id = ? AND view = ?",
+                                     image_id, character_id, view),
+            lambda image_id: execute("DELETE FROM character_images WHERE id = ?", image_id),
+            fit="contain", **options)
+
+    ui.add_body_html(UNSAVED_GUARD)
+    notice = lock_notice("已有正面全身图，提示词不可编辑。如需修改，请删除全部正面全身图，或复制角色。",
+                         "全部正面全身图", delete_front, "复制角色", copy_character)
+    notice.set_visibility(locked)
+    for i, (column, label) in enumerate(CHARACTER_LABELS.items()):
+        with ui.row().classes("w-full items-end justify-between no-wrap mt-2"):
+            ui.label(label).classes("text-xs font-medium text-zinc-500")
+            if i == 0:
+                save_button = ui.button("保存", icon="save", on_click=save).props("unelevated dense").classes("px-3 rounded-lg")
+                save_button.disable()
+        fields[column] = ui.textarea(value=character[column], on_change=on_edit).classes("w-full").props("outlined autogrow")
+        if locked:
+            fields[column].props("readonly")
+    front_locked = False
+    refresh_front = view_gallery("front", on_count=unlock_when_empty, notice=front_notice,
+                                 selection_locked=lambda: view_count(character_id, front=False) > 0)
+    ui.label("多视角").classes("text-lg font-semibold mt-6")
+    ui.label("选用一张正面全身图后，在 ComfyUI 中用“加载角色参考图”生成以下视角。生成后正面全身图的选用会被锁定。"
+             ).classes("text-xs text-zinc-400")
+    refresh_views = [view_gallery(view, on_count=on_view_count) for view in list(VIEWS)[1:]]
+
+
+@ui.page("/character/{character_id}")
+def character_page(character_id: int):
+    character = visible_character(character_id, current_owner(), "c.*, p.name AS project")
+    if not character:
+        return RedirectResponse("/")
+    list_url = f"/project/{character['project_id']}/characters"
+    page_frame((character["project"], f"/project/{character['project_id']}"), ("角色", list_url))
+    ui.add_head_html(VIEWER_HEAD)
+
+    def delete():
+        execute("DELETE FROM characters WHERE id = ?", character_id)
+        ui.navigate.to(list_url)
+
+    with ui.column().classes(CONTAINER + " gap-1"):
+        ui.button("返回角色列表", icon="arrow_back", on_click=lambda: ui.navigate.to(list_url)
+                  ).props("flat dense color=grey-8 no-caps").classes("-ml-2")
+        title_row(character["name"], lambda: rename_dialog(character["name"], lambda name: execute(
+            "UPDATE characters SET name = ? WHERE id = ?", name, character_id)))
+        ui.label(f"角色 ID：{character_id}").classes("text-xs text-zinc-400")
+        character_editor(character)
+        ui.button("删除角色", icon="delete_outline", on_click=lambda: confirm_delete(character["name"], delete)
                   ).props("flat dense color=grey-7 no-caps").classes("self-end mt-4")
 
 

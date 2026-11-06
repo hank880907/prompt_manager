@@ -43,7 +43,7 @@ def preview(filename: str):
 
 def remove_orphans() -> None:
     """Delete image files whose rows are gone, e.g. after a project, episode or scene was deleted."""
-    known = {row["filename"] for row in query("SELECT filename FROM images")}
+    known = {row["filename"] for row in query("SELECT filename FROM images UNION SELECT filename FROM character_images")}
     for file in IMAGES_DIR.iterdir():
         if file.name not in known:
             file.unlink()

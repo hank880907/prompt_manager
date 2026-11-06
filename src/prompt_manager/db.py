@@ -30,6 +30,20 @@ CREATE TABLE IF NOT EXISTS scenes (
     position INTEGER NOT NULL DEFAULT 0,
     selected_image_id INTEGER REFERENCES images(id) ON DELETE SET NULL
 );
+CREATE TABLE IF NOT EXISTS characters (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    positive TEXT NOT NULL DEFAULT '',
+    negative TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS character_images (
+    id INTEGER PRIMARY KEY,
+    character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    view TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    selected INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS users (
     username TEXT PRIMARY KEY,
     password_hash TEXT NOT NULL
@@ -60,6 +74,17 @@ if "selected_image_id" not in scene_columns:
         conn.execute("ALTER TABLE scenes ADD COLUMN selected_image_id INTEGER REFERENCES images(id) ON DELETE SET NULL")
 
 
+# Keys match VIEWS in the ComfyUI node.
+VIEWS = {
+    "front": "正面全身",
+    "three_quarter": "四分之三侧面全身",
+    "side": "侧面全身",
+    "back": "背面全身",
+    "face": "正脸特写",
+    "face_three_quarter": "四分之三侧脸特写",
+    "seated": "坐姿中景",
+}
+
 # Pass the owner twice; None (trusted API caller) sees everything.
 VISIBLE = "(p.owner IS NULL OR ? IS NULL OR p.owner = ?)"
 
@@ -80,6 +105,16 @@ def execute(sql: str, *args) -> int:
 def visible_scene(scene_id: int, owner: str | None, columns: str = "s.id") -> sqlite3.Row | None:
     return get(f"SELECT {columns} FROM scenes s JOIN episodes e ON e.id = s.episode_id "
                f"JOIN projects p ON p.id = e.project_id WHERE s.id = ? AND {VISIBLE}", scene_id, owner, owner)
+
+
+def visible_character(character_id: int, owner: str | None, columns: str = "c.id") -> sqlite3.Row | None:
+    return get(f"SELECT {columns} FROM characters c JOIN projects p ON p.id = c.project_id "
+               f"WHERE c.id = ? AND {VISIBLE}", character_id, owner, owner)
+
+
+def selected_front(character_id: int) -> sqlite3.Row | None:
+    return get("SELECT * FROM character_images WHERE character_id = ? AND view = 'front' AND selected",
+               character_id)
 
 
 def execute_many(sql: str, rows: list[tuple]) -> None:

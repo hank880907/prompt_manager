@@ -2,8 +2,9 @@ import PhotoSwipe from "./photoswipe.esm.min.js";
 
 const icon = (name) => `<i class="material-icons">${name}</i>`;
 
-// items: [{id, filename, src, msrc, width, height}]; actions are handled in Python via emitEvent.
-window.openViewer = (items, index, selectedId) => {
+// items: [{id, filename, src, msrc, width, height}]; actions are handled in Python via `${event}_*` events.
+// locked: the selection can't change and the selected image can't be deleted.
+window.openViewer = (items, index, selectedId, event, locked) => {
   const pswp = new PhotoSwipe({ dataSource: items, index, loop: false, bgOpacity: 1, trapFocus: false });
 
   pswp.on("uiRegister", () => {
@@ -16,7 +17,10 @@ window.openViewer = (items, index, selectedId) => {
     });
     pswp.ui.registerElement({
       name: "delete", order: 9, isButton: true, title: "删除", html: icon("delete_outline"),
-      onClick: () => emitEvent("viewer_delete", pswp.currSlide.data.id),
+      onClick: () => emitEvent(`${event}_delete`, pswp.currSlide.data.id),
+      onInit: (el) => pswp.on("change", () => {
+        el.style.display = locked && pswp.currSlide.data.id === selectedId ? "none" : "";
+      }),
     });
     pswp.ui.registerElement({
       name: "select", order: 10, appendTo: "root", tagName: "button",
@@ -26,16 +30,17 @@ window.openViewer = (items, index, selectedId) => {
           el.classList.toggle("selected", selected);
           el.innerHTML = icon(selected ? "check_circle" : "radio_button_unchecked") + (selected ? "已选用" : "选用");
         };
+        el.disabled = locked;
         el.onclick = () => {
           selectedId = selectedId === pswp.currSlide.data.id ? null : pswp.currSlide.data.id;
-          emitEvent("viewer_select", selectedId);
+          emitEvent(`${event}_select`, selectedId);
           update();
         };
         pswp.on("change", update);
       },
     });
   });
-  pswp.on("close", () => emitEvent("viewer_closed"));
+  pswp.on("close", () => emitEvent(`${event}_closed`));
   pswp.init();
   window.viewer = pswp;
 };

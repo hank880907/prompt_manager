@@ -18,5 +18,8 @@ Put HTTPS in front of it (e.g. Caddy) before exposing it publicly; otherwise pas
 3. Nodes (category `prompt_manager`):
    - **加载场景提示词**: pick a scene, outputs `positive`, `negative`, `scene_id`, `aspect_ratio` (connects to the Resolution Selector node).
    - **保存候选图**: connect `images` and `scene_id`; images appear on the scene page.
+   - **加载角色提示词**: pick a character, outputs `positive`, `negative`, `character_id`. Use with 保存角色图 set to `full body, front view`.
+   - **加载角色参考图**: pick a character and a view, outputs the selected front image, `positive`, `negative`, `view_prompt`, `character_id`, `view`.
+   - **保存角色图**: connect `images`, `character_id`, and `view` (pick it or connect it from 加载角色参考图).
 
 The scene list in the dropdown refreshes when ComfyUI reloads node definitions (press `R` or reload the page).
