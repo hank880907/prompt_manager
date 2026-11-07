@@ -389,7 +389,7 @@ async def sync_jobs() -> None:
 
 def candidate_gallery(event: str, title: str, empty_text: str, load, select, delete,
                       on_count=lambda count: None, selection_locked=lambda: False, fit: str = "cover",
-                      notice=lambda: None, pending=lambda: 0, on_generate=None):
+                      notice=lambda: None, pending=lambda: 0):
     """load() returns rows with id, filename and selected; notice() renders under the title;
     pending() is the number of images still being generated. Needs VIEWER_HEAD on the page."""
     shown = (0, 0)
@@ -400,10 +400,7 @@ def candidate_gallery(event: str, title: str, empty_text: str, load, select, del
         images = load()
         shown = (len(images), pending())
         on_count(sum(shown))
-        with ui.row().classes("w-full items-end justify-between no-wrap"):
-            section_label(f"{title}（{len(images)}）")
-            if on_generate:
-                ui.button("生成", icon="auto_awesome", on_click=on_generate).props("flat dense no-caps")
+        section_label(f"{title}（{len(images)}）")
         notice()
         if not any(shown):
             empty_state(empty_text)
@@ -686,12 +683,9 @@ def character_editor(character) -> None:
         if count == 0:
             set_locked(False)
 
-    async def generate(view: str) -> None:
+    async def generate(view: str) -> bool:
         if view == "front" and save_button.enabled:
             save()
-        if view != "front" and not selected_front(character_id):
-            ui.notify("请先选用一张正面全身图", type="warning")
-            return
         label = character_label(visible_character(character_id, current_owner(), "c.id, c.name, p.name AS project"))
         inputs = {node: {"character": label} for node in (
             "PromptManagerLoadCharacter", "PromptManagerLoadCharacterReference", "PromptManagerLoadCharacterUploads")}
@@ -700,12 +694,21 @@ def character_editor(character) -> None:
             inputs["PromptManagerLoadCharacterReference"]["view"] = VIEW_PROMPTS[view]
         workflow = CHARACTER_FRONT_WORKFLOW if view == "front" else CHARACTER_VIEW_WORKFLOW
         if not await start_job(workflow, inputs, character_id=character_id, view=view):
-            return
+            return False
         if view == "front":
             set_locked(True)
         else:
             refresh_views[view]()
         refresh_front()
+        return True
+
+    async def generate_views() -> None:
+        if not selected_front(character_id):
+            ui.notify("请先选用一张正面全身图", type="warning")
+            return
+        for view in refresh_views:
+            if not await generate(view):
+                return
 
     async def add_references(e) -> None:
         uploader.reset()
@@ -820,9 +823,10 @@ def character_editor(character) -> None:
     ui.label("多视角").classes("text-lg font-semibold mt-6")
     ui.label("选用一张正面全身图后，在 ComfyUI 中用“加载角色参考图”生成以下视角。生成后正面全身图的选用会被锁定。"
              ).classes("text-xs text-zinc-400")
-    refresh_views = {view: view_gallery(view, on_count=on_view_count,
-                                        on_generate=(lambda v=view: generate(v)) if CHARACTER_VIEW_WORKFLOW else None)
-                     for view in list(VIEWS)[1:]}
+    if CHARACTER_VIEW_WORKFLOW:
+        ui.button("生成全部视角", icon="auto_awesome", on_click=generate_views).props("unelevated no-caps").classes(
+            "w-full mt-3 rounded-lg")
+    refresh_views = {view: view_gallery(view, on_count=on_view_count) for view in list(VIEWS)[1:]}
 
 
 @ui.page("/character/{character_id}")
